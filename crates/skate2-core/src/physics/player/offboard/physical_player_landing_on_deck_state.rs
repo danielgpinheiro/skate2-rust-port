@@ -459,6 +459,11 @@ impl PhysicalAssemblyWorld {
                     Ok(())
                 })?;
             }
+            if std::env::var_os("SKATE2_TRACE_HIPPY").is_some() {
+                eprintln!(
+                    "hippy trace: landing angle {angle:.3} ascending {ascending} spin {spin:.3} desired {desired:.4} turn {turn:.4} frames {frames:.1}"
+                );
+            }
         }
         let turn = state(owner, |s| {
             s.turn_speed_adjusted.ok_or(E::Missing("adjusted turn"))
@@ -508,6 +513,9 @@ impl PhysicalAssemblyWorld {
             .dot_vector(z, V::known([0., 0., 1., 0.]))
             .map_err(|e| service("raw board Z dot", e))?
             .abs();
+        if std::env::var_os("SKATE2_TRACE_HIPPY").is_some() {
+            eprintln!("hippy trace: landing ttl {ttl:.3} feet IK dot {dot:.3}");
+        }
         // Raw BGE skips DisableIK for unordered too.
         if dot < float(refs, C::MinDotForFeetIk)? {
             self.landing_debug(refs)?;

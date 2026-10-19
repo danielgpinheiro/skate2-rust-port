@@ -204,6 +204,7 @@ pub(crate) fn run(root: &std::path::Path) -> RenderResult<()> {
         Some("offboard-street-look") => Some(ControlsDemo::OffboardStreetLook),
         Some("postfx-sun-look") => Some(ControlsDemo::PostfxSunLook),
         Some("perf-skate") => Some(ControlsDemo::PerfSkate),
+        Some("hippy-spin") => Some(ControlsDemo::HippySpin),
         Some(_) => return Err("unknown --live-controls-demo sequence".into()),
     };
     let ollie_tweak_left = args
@@ -528,6 +529,7 @@ enum ControlsDemo {
     OffboardStreetLook,
     PostfxSunLook,
     PerfSkate,
+    HippySpin,
 }
 
 impl ControlsDemo {
@@ -568,6 +570,27 @@ impl ControlsDemo {
                 // second every four. No steering or tricks; physics stays live.
                 if (30..300).contains(&frame) || (frame >= 300 && (frame - 300) % 240 < 60) {
                     sample.buttons = 0x1000;
+                }
+            }
+            Self::HippySpin => {
+                // Pushes off, then every five seconds holds both push buttons for a hippy jump and
+                // releases them with the stick held right: from the wind-up on one jump of each
+                // pair, only in the air on the other. A push between jumps keeps the speed up.
+                if (30..150).contains(&frame) {
+                    sample.buttons = 0x1000;
+                }
+                if frame >= 240 {
+                    let phase = (frame - 240) % 300;
+                    let from_wind_up = (frame - 240) / 300 % 2 == 0;
+                    if phase < 40 {
+                        sample.buttons = 0x5000;
+                    }
+                    if (if from_wind_up { 0..100 } else { 40..100 }).contains(&phase) {
+                        sample.left_x = i16::MAX;
+                    }
+                    if (220..260).contains(&phase) {
+                        sample.buttons = 0x1000;
+                    }
                 }
             }
             Self::PostfxSunLook => {
