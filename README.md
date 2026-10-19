@@ -2,9 +2,7 @@
 
 # Skate 2 Rust Port
 
-<img src="docs/images/online-lobby.png" alt="Skaters in an online lobby" width="720">
-
-*Skate 2, rebuilt as a native PC game in Rust.*
+**Skate 2, rebuilt as a native PC game in Rust.**
 
 Windows · Linux · Steam Deck · Online play
 
@@ -22,6 +20,9 @@ PC. Requires your own legally obtained Xbox 360 copy of Skate 2 to run, you will
 > [!NOTE]
 > **Work in progress.** Free skate, Party Play and online play are playable; the career is
 > mostly there. Expect some rough edges.
+
+## Screenshot
+<img src="docs/images/online-lobby.png" alt="Skaters in an online lobby" width="720">
 
 ## Features
 
