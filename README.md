@@ -4,7 +4,7 @@
 
 <img src="docs/images/online-lobby.png" alt="Skaters in an online lobby" width="720">
 
-**Skate 2, rebuilt as a native PC game in Rust.**
+*Skate 2, rebuilt as a native PC game in Rust.*
 
 Windows · Linux · Steam Deck · Online play
 
