@@ -276,7 +276,8 @@ impl<T, C> SelectedLiveSession<T, C> {
 
     /// `StateMainGameFlow::DoStartSinglePlayerGame` 0x8277b070 outside Party Play, as a game
     /// starts: the AI players go, `ResetPlayers`, player 0 again with the profile's name, the
-    /// loaded skater's attributes again (`ApplyPlayerAttributes(0)`, and slot 8's with ghosts),
+    /// loaded skater's attributes again (`ApplyPlayerAttributes(0)`, and slot 8's with ghosts,
+    /// once `IsLoaded`: a skater still registering counts),
     /// and the front end's controller, the PC pad 0, for player 0.
     pub(super) fn start_single_player_players(&mut self) -> Result<(), SelectedLiveError> {
         self.inner.try_unregister_all_ai_players().map_err(error)?;
@@ -286,7 +287,7 @@ impl<T, C> SelectedLiveSession<T, C> {
         let player = self.inner.player.as_ref().ok_or_else(|| error("single player absent"))?;
         let (loader, services) = (&player.selected.owners.loader, &player.selected.owners.services);
         let mut regular = None;
-        if matches!(loader.phase(), PlayerLoadPhase::Loaded { .. })
+        if loader.is_loaded()
             && let Some(selection) = loader.current()
         {
             let record = if matches!(selection, PlayerSelection::CreateACharacter { .. }) {

@@ -290,7 +290,11 @@ skate, an online game) resets the rows again, creates player 0 under the profile
 the loaded skater's attributes (`PlayerLoaderImpl::ApplyPlayerAttributes` 0x828158f0) and gives it
 the front end's controller (`selected_session_freeskate.rs` `unload_players`,
 `start_single_player_players`). Before this, the career after a Party Play game kept "Player 1" as
-the player's name. `cMsgSetPlayer` reaches only a `PartyPlayUI`, the UI `ResetGame` makes in
+the player's name. The attributes apply once `PlayerLoader::IsLoaded` 0x828141c8 holds: the
+character id `OnSimCharacterLoaded` 0x82817fb4 stores before the attributes and the registration,
+so a skater still registering counts (`PlayerLoaderSlot::is_loaded`). Waiting for the
+registration instead left a game started soon after boot on the reset's gestures, truck
+tightness and wheel hardness until Edit Skater applied the record again. `cMsgSetPlayer` reaches only a `PartyPlayUI`, the UI `ResetGame` makes in
 `GM_PartyPlay` (its constructor 0x828aeae0 subscribes to it; `PlayerUI` does not).
 
 A switched challenge has no tips loading screen, on purpose: the port's loads finish behind the

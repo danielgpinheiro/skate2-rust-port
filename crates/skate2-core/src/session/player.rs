@@ -163,6 +163,16 @@ impl PlayerLoaderSlot {
         self.phase
     }
 
+    /// `PlayerLoader::IsLoaded` 0x828141c8: the loader holds a loaded character, whose id
+    /// `OnSimCharacterLoaded` (0x82817fb4) stores before the attributes and the registration.
+    #[must_use]
+    pub const fn is_loaded(&self) -> bool {
+        matches!(
+            self.phase,
+            PlayerLoadPhase::ApplyingAttributes { .. } | PlayerLoadPhase::Registering { .. } | PlayerLoadPhase::Loaded { .. }
+        )
+    }
+
     pub const fn set_marquee(&mut self, definition_id: u64, peer_id: i64) {
         self.requested = PlayerSelection::Marquee {
             definition_id,
@@ -445,6 +455,21 @@ mod tests {
                 character_id: 0x1234
             }
         );
+    }
+
+    #[test]
+    fn is_loaded_holds_from_the_loaded_asset_through_registration() {
+        let mut slot = PlayerLoaderSlot::new(LOCAL_PLAYER_INDEX);
+        slot.set_marquee(DEFAULT_MARQUEE_ID, NO_PEER_ID);
+        assert!(!slot.is_loaded());
+        slot.begin_marquee_load(&default_definition(), 17).unwrap();
+        assert!(!slot.is_loaded());
+        slot.character_loaded(17, 0x1234, 18).unwrap();
+        assert!(slot.is_loaded());
+        slot.finish_loaded_attributes(false, true).unwrap();
+        assert!(slot.is_loaded());
+        slot.character_registered(18, 0x1234).unwrap();
+        assert!(slot.is_loaded());
     }
 
     #[test]
