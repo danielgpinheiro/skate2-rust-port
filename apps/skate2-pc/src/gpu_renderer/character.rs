@@ -449,6 +449,17 @@ fn uv_attribute(geometry: &NativeMeshGeometry, set: u8) -> Result<&[[f32; 2]], C
     Ok(values)
 }
 
+/// A UV set the mesh's vertex declaration may lack: `D3D::PatchVertexShaderToMatchVertexDeclaration`
+/// 82c43eb0..bc fetches (0,0,0,1) for a shader input with no declaration element, so an absent
+/// set reads as zero XY (`None`). An authored set is validated as usual, duplicates included.
+fn declared_uv(geometry: &NativeMeshGeometry, set: u8) -> Result<Option<&[[f32; 2]]>, CharacterGpuError> {
+    if geometry.attributes.iter().any(|a| a.semantic == VertexSemantic::TextureCoordinate(set)) {
+        uv_attribute(geometry, set).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 fn vertex_bytes(
     geometry: &NativeMeshGeometry,
     palette_count: u16,
@@ -463,13 +474,12 @@ fn vertex_bytes(
     let weights = byte_attribute(geometry, VertexSemantic::BlendWeight(0))?;
     let indices = byte_attribute(geometry, VertexSemantic::BlendIndices(0))?;
     let uv_values = uv_attribute(geometry, 0)?;
-    // defaulthair.fx VS_IN `UV1 : TEXCOORD1` addresses `i_alpha`.
-    let alpha_uv = match family {
-        CharacterShaderFamily::Hair | CharacterShaderFamily::HairRopa => Some(uv_attribute(geometry, 1)?),
-        _ => None,
-    };
+    // defaulthair.fx VS_IN `UV1 : TEXCOORD1` addresses `i_alpha`; a mesh without the set (some
+    // glasses) reads zero XY.
+    let hair = matches!(family, CharacterShaderFamily::Hair | CharacterShaderFamily::HairRopa);
+    let alpha_uv = if hair { declared_uv(geometry, 1)? } else { None };
     let stamp = if family==CharacterShaderFamily::LivingWorldStamp { Some(stamp::vectors(geometry)?) }else{None};
-    let stride = if stamp.is_some(){52}else if alpha_uv.is_some() { 36 } else { 28 };
+    let stride = if stamp.is_some(){52}else if hair { 36 } else { 28 };
     let mut result = Vec::with_capacity(geometry.positions.len() * stride);
     for (vertex, position) in geometry.positions.iter().enumerate() {
         for &index in &indices[vertex] {
@@ -485,8 +495,8 @@ fn vertex_bytes(
         result.extend(uv_values[vertex].iter().flat_map(|v| v.to_ne_bytes()));
         result.extend(weights[vertex]);
         result.extend(indices[vertex]);
-        if let Some(alpha_uv) = alpha_uv {
-            result.extend(alpha_uv[vertex].iter().flat_map(|v| v.to_ne_bytes()));
+        if hair {
+            result.extend(alpha_uv.map_or([0.0; 2], |uv| uv[vertex]).iter().flat_map(|v| v.to_ne_bytes()));
         }
         if let Some((tangent,binormal))=stamp {
             result.extend(tangent[vertex].iter().chain(&binormal[vertex]).flat_map(|v|v.to_ne_bytes()));

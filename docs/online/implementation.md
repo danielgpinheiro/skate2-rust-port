@@ -448,6 +448,11 @@ to the lobby:
   disconnected and kicked notices.
 - **Lobby and challenges**: no AI skaters (`AISkaterManager::LoadGame` notes the network game),
   and, a port change as in Party Play, no pedestrians or traffic.
+- **Session markers**: `SessionMarker::Update` 0x828acc90 and `VerifyPosition` 0x828ab328 ask
+  `Simulation::IsNetworkGame`, which holds in an online game, so security and no-skate zones
+  never forbid a marker there. In its place `VerifyLocalPlayerOkToSet` 0x828ab4a0 checks the
+  local skater's respawn transform (`CalcRespawnTransform` 0x825f09a8) with
+  `BreadCrumbManager::IsPostionOk`.
 - **Lobby**: each player starts at the location's spawn point of its player index
   (`GetStreamerPosition`); the top-left event log (`hud_online_eventlog2`) tells of joins,
   leaves, host changes, privacy changes and the host's location changes; the bottom-right
@@ -532,7 +537,10 @@ to the lobby:
 - **Joining a game mid-challenge**: the joiner skates in the lobby until the next challenge,
   apart from the challenge's players (see Relays above). A remote skater whose frames stop for
   three seconds shows no more (its name and sounds go with it) until its frames come again; a
-  shorter hitch leaves it where it was.
+  shorter hitch leaves it where it was. The original takes no join while a challenge runs, so
+  the challenge's players hear nothing of a member waiting in the pre-game lobby: no line when
+  one leaves. As a port addition, their event log reads "<name> has joined pre-game lobby." when
+  one joins during their round.
 - **Sync points**: the original's flow preloaded the round's NIS and waited for the streamer at
   the spawn point before reporting the sync point; here the sync point goes out at once and the
   teleport after the release streams the spawn (the flow teleport's `MoveStreamFocus`).

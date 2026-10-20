@@ -209,6 +209,9 @@ position expansion and world-space output described above. It additionally
 passes UV0 and UV1, and performs `GetZBias(z, 0)` before output. The pixel shader
 reads `i_alpha` using UV1 and multiplies resulting alpha by `i_params[0].x`.
 An opaque diffuse-only hair draw therefore does not implement this material.
+Some meshes on this effect (glasses) carry no TEXCOORD1. Their UV1 reads zero XY:
+`D3D::PatchVertexShaderToMatchVertexDeclaration` 0x82c43db8, for a shader input with
+no declaration element (0x82c43eb0..bc), sets swizzle 0x9250, constants (0,0,0,1).
 
 PDB `SkaterPresEntity` places `i_vtx_params` at +910. Raw constructor
 827e5960..59d0 loads its existing full vector and inserts X=1 using vrlimi mask 8;

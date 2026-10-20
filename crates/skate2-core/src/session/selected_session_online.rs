@@ -902,20 +902,29 @@ impl<T, C> SelectedLiveSession<T, C> {
         Ok(())
     }
 
-    /// `OE_PlayerJoin`: a remote skater waits for the joiner's recipe.
+    /// `OE_PlayerJoin`: a remote skater waits for the joiner's recipe. One who joins during the
+    /// local player's round waits in the pre-game lobby, which the round's players are told of (PC
+    /// port addition).
     fn online_player_join(&mut self, player: &PlayerInfo) {
         trace(format_args!("{} joined in slot {}", player.name, player.slot));
+        let apart = self.online_apart_from_round(player.user_id);
         let Some(game) = self.online.game.as_mut() else { return };
         game.players.retain(|known| known.user_id != player.user_id);
         game.players.push(OnlinePlayer { user_id: player.user_id, slot: player.slot, name: player.name.clone() });
         game.remotes.insert(player.user_id, RemoteSkater::new(player.user_id, player.slot));
         game.announced.retain(|&announced| announced != player.user_id);
         self.online.lobby_hud_dirty = true;
+        if apart && game.entered {
+            self.online.event_log.add(EventText::literal(format!("{} has joined pre-game lobby.", player.name)));
+        }
     }
 
     /// `HandlePlayerLeave` 0x8276aa70 and `OnlineEventLog::OnEvent(OE_PlayerLeave)`: the skater
-    /// goes, the log names who left, and the host may change.
+    /// goes, the log names who left, and the host may change. The original takes no join while a
+    /// challenge runs, so a round's players never hear of a member waiting in the pre-game lobby:
+    /// that member's leave is not logged to them.
     fn online_player_leave(&mut self, user_id: u64, reason: u8) {
+        let apart = self.online_apart_from_round(user_id);
         self.online_round_player_left(user_id);
         let Some(game) = self.online.game.as_mut() else { return };
         let name = game.name(user_id);
@@ -929,7 +938,9 @@ impl<T, C> SelectedLiveSession<T, C> {
         let host_after = game.host();
         let host_name = host_after.map(|host| game.name(host));
         if game.entered {
-            self.online.event_log.add(EventText::named("ID_ONLINE_EVENT_LEAVE", &name));
+            if !apart {
+                self.online.event_log.add(EventText::named("ID_ONLINE_EVENT_LEAVE", &name));
+            }
             if host_before != host_after
                 && let Some(host) = host_name
             {

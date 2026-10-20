@@ -23,39 +23,46 @@ pub enum LineState {
 }
 
 /// A line's text: a localization key formatted with arguments
-/// (`LocalizerManager::FormatString`), or a line of lobby chat shown as it is.
+/// (`LocalizerManager::FormatString`), or a line shown as it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventText {
     pub key: &'static str,
     pub arguments: Vec<String>,
     /// The arguments are HAL ids, each formatted first.
     pub localized: bool,
-    /// A chat line (PC port addition), shown in place of the key.
-    pub chat: Option<String>,
+    /// A line shown in place of the key: lobby chat and the pre-game lobby notice (PC port
+    /// additions).
+    pub literal: Option<String>,
 }
 
 impl EventText {
     #[must_use]
     pub fn named(key: &'static str, name: &str) -> Self {
-        Self { key, arguments: vec![name.to_owned()], localized: false, chat: None }
+        Self { key, arguments: vec![name.to_owned()], localized: false, literal: None }
     }
 
     /// A key with no arguments.
     #[must_use]
     pub fn plain(key: &'static str) -> Self {
-        Self { key, arguments: Vec::new(), localized: false, chat: None }
+        Self { key, arguments: Vec::new(), localized: false, literal: None }
     }
 
     /// A key whose arguments are themselves HAL ids.
     #[must_use]
     pub fn localized(key: &'static str, arguments: Vec<String>) -> Self {
-        Self { key, arguments, localized: true, chat: None }
+        Self { key, arguments, localized: true, literal: None }
+    }
+
+    /// A line shown as it is.
+    #[must_use]
+    pub fn literal(line: String) -> Self {
+        Self { key: "", arguments: Vec::new(), localized: false, literal: Some(line) }
     }
 
     /// A line of lobby chat.
     #[must_use]
     pub fn chat(line: String) -> Self {
-        Self { key: "", arguments: Vec::new(), localized: false, chat: Some(line) }
+        Self::literal(line)
     }
 }
 

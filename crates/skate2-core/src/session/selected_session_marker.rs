@@ -68,6 +68,8 @@ pub(crate) enum SelectedSessionMarkerError {
     LayerLock,
     Layer(WorldPainterLayerError),
     WorldLock,
+    SimRateLock,
+    SimRate(crate::simulation_sim_rate::SimRateError),
     LivingWorldLock,
     MissingChase,
     Breadcrumbs(crate::actor_construction::ActorConstructionError),
@@ -81,8 +83,6 @@ pub(crate) enum SelectedSessionMarkerError {
     ChallengeQueue(crate::hermes_challenge_queue::ChallengeQueueError),
     /// `CreateSessionMarker` reads an OnlineChallenge's net challenge type, which was not given.
     PendingOnlineChallengeType,
-    /// Network `VerifyLocalPlayerOkToSet` position check.
-    PendingNetworkRespawnCheck,
     /// `TeleportRequiresLoadScreen` needs the unported `IsAreaLoaded`.
     PendingLoadScreenQuery,
     /// The security dismissal popup is front-end owned.
@@ -194,10 +194,13 @@ impl<C> SessionMarkerRules for SelectedSessionMarkerSources<'_, C> {
     fn fe_in_game(&mut self) -> Result<bool, Self::Error> {
         Ok(true)
     }
+    /// `Simulation::IsNetworkGame`8289e448, which `SessionMarker::Update`, `VerifyPosition` and
+    /// `VerifyLocalPlayerOkToSet` ask: an online game in play, else `sGameInfo.isNetworkGame`.
     fn network_game(&mut self) -> Result<bool, Self::Error> {
-        self.game_info
-            .try_is_network_game()
-            .map_err(SelectedSessionMarkerError::GameInfo)
+        use SelectedSessionMarkerError as E;
+        let world = self.world.lock().map_err(|_| E::WorldLock)?;
+        let rate = world.sim_rate.lock().map_err(|_| E::SimRateLock)?;
+        rate.try_is_network_game().map_err(E::SimRate)
     }
     /// The Create-A-Spot service's in-use bytes (+0x34/+0x35) are only set by
     /// entering Create-A-Spot from the front end, which the port has no path to.
@@ -251,8 +254,15 @@ impl<C> SessionMarkerRules for SelectedSessionMarkerSources<'_, C> {
             })
         })
     }
+    /// `VerifyLocalPlayerOkToSet`828ab4a0 in a network game: `IsPostionOk` at the local Actor's
+    /// `CalcRespawnTransform` 0x825f09a8.
     fn local_respawn_position_ok(&mut self) -> Result<bool, Self::Error> {
-        Err(SelectedSessionMarkerError::PendingNetworkRespawnCheck)
+        let cvars = self.cvars;
+        let respawn = Self::output(self.local_actor()?.as_ref(), |output| {
+            try_calc_respawn_transform(output, cvars, &mut HostReckoningNumeric)
+                .map_err(SelectedSessionMarkerError::Calc)
+        })?;
+        self.position_ok(&respawn)
     }
     /// `GetMainActivity`828ab0f0: only a career runs challenge activities.
     fn main_activity_allows(&mut self, use_marker: bool) -> Result<Option<bool>, Self::Error> {

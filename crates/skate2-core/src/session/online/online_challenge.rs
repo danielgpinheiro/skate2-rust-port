@@ -868,6 +868,13 @@ impl<T, C> SelectedLiveSession<T, C> {
         }
     }
 
+    /// Whether `user_id` waits in the pre-game lobby, apart from the round the local player plays:
+    /// a member the round's `GameReset` table does not hold, who joined after its load (a PC port
+    /// addition: the original takes no join while a challenge runs).
+    pub(super) fn online_apart_from_round(&self, user_id: u64) -> bool {
+        self.online.round.as_ref().is_some_and(|round| !round.players.contains(&user_id))
+    }
+
     /// The players pacing the next challenge tick (`Round::contributors`). Pins do not count:
     /// a script pins `vars.LocalPlayerID`, a different player on each console.
     fn online_contributors(&self) -> Option<u8> {

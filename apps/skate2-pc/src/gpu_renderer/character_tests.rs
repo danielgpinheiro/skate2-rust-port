@@ -43,14 +43,12 @@ fn upload_keeps_original_position_and_raw_weights_for_shader_expansion() {
 }
 
 #[test]
-fn hair_vertices_append_the_alpha_uv_and_require_it() {
+fn hair_vertices_append_the_alpha_uv_or_its_native_zero_xy() {
     let mut hair = geometry([0, 1, 2, 3]);
-    assert!(matches!(
-        vertex_bytes(&hair, 4, CharacterShaderFamily::Hair),
-        Err(CharacterGpuError::MissingOrDuplicateAttribute(
-            VertexSemantic::TextureCoordinate(1)
-        ))
-    ));
+    let absent = vertex_bytes(&hair, 4, CharacterShaderFamily::Hair).unwrap();
+    assert_eq!(absent.len(), 36);
+    assert_eq!(&absent[24..28], &[0, 1, 2, 3]);
+    assert_eq!(&absent[28..36], &[0; 8]);
     hair.attributes.push(NativeVertexAttribute {
         semantic: VertexSemantic::TextureCoordinate(1),
         original_format: VERTEX_FORMAT_FLOAT2,
@@ -63,6 +61,13 @@ fn hair_vertices_append_the_alpha_uv_and_require_it() {
     assert_eq!(&bytes[32..36], &(-2.0_f32).to_ne_bytes());
     let body = vertex_bytes(&hair, 4, CharacterShaderFamily::Character).unwrap();
     assert_eq!(body.len(), 28);
+    hair.attributes.push(hair.attributes.last().unwrap().clone());
+    assert!(matches!(
+        vertex_bytes(&hair, 4, CharacterShaderFamily::Hair),
+        Err(CharacterGpuError::MissingOrDuplicateAttribute(
+            VertexSemantic::TextureCoordinate(1)
+        ))
+    ));
 }
 
 #[test]

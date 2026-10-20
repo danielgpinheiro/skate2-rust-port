@@ -17,11 +17,7 @@ pub(super) fn cas_vertex_bytes(geometry:&NativeMeshGeometry,palette_count:u16,fa
         // D3D::PatchVertexShaderToMatchVertexDeclaration82c43eb0..bc
         // supplies (0,0,0,1) for an absent semantic. Some original CAS cloth
         // meshes omit TEXCOORD1; its zero XY disables the decal branch.
-        // Still validate any authored stream, including duplicate semantics.
-        let uv = if geometry.attributes.iter()
-            .any(|a| a.semantic == VertexSemantic::TextureCoordinate(1)) {
-            Some(uv_attribute(geometry, 1)?)
-        } else { None };
+        let uv = declared_uv(geometry, 1)?;
         let mut vertices = Vec::with_capacity(geometry.positions.len() * 60);
         for (index, base) in base
             .chunks_exact(if family == CharacterShaderFamily::Hair {

@@ -56,7 +56,7 @@ impl OnlineEventLogMovie {
                 LineState::Outro => line.goto(assets, "outro")?,
                 LineState::Shown => line.goto_and_stop(assets, "shown")?,
             }
-            let shown = if let Some(line) = &text.chat {
+            let shown = if let Some(line) = &text.literal {
                 line.encode_utf16().collect()
             } else {
                 // AddLocationChangeMessage formats its HAL arguments first.

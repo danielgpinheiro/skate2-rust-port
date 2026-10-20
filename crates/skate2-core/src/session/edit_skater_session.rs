@@ -187,9 +187,7 @@ mod board_part_tests {
     use super::*;
     use skate2_formats::{cac_parts::SLOT_NAMES, skater_profile::CacPartId};
 
-    #[test]
-    #[ignore = "requires original SKATE2_GAME_ROOT assets"]
-    fn every_board_truck_and_wheel_loads_in_the_editor() {
+    fn original_assets() -> (MountSet, Arc<AttributeRuntimeVault>, InputCvarReferences, CacPartDb) {
         use skate2_formats::mount::{MountedBig, SKATE2_ARCHIVES};
         let root = std::path::PathBuf::from(std::env::var_os("SKATE2_GAME_ROOT").expect("game root"));
         let mut mounts = MountSet::new();
@@ -206,6 +204,44 @@ mod board_part_tests {
         let cvars = InputCvarReferences::new_static_initialized();
         crate::input_cvar_runtime::InputCvarManager::new().try_link(&cvars).unwrap();
         let db = CacPartDb::parse(&mounts.read_path(skate2_formats::cac_parts::DATABASE_PATH).unwrap()).unwrap();
+        (mounts, vault, cvars, db)
+    }
+
+    /// Every part a clothing, accessory or board list offers either sex (`LoadParts`), worn the
+    /// way its thumbnail's preview wears it.
+    #[test]
+    #[ignore = "requires original SKATE2_GAME_ROOT assets"]
+    fn every_listed_part_loads_in_the_editor() {
+        use EditSkaterOption as O;
+        let (mounts, vault, cvars, db) = original_assets();
+        let mut hierarchies = std::array::from_fn(|_| None);
+        let mut failures = Vec::new();
+        let mut tried = 0;
+        for male in [true, false] {
+            let hierarchy = EditSkaterSession::cached_hierarchy(&mounts, &mut hierarchies, male).unwrap().clone();
+            let fresh = edit_skater_record::fresh_record(&db, &vault, male).unwrap();
+            for option in [
+                O::Hats, O::TShirts, O::ButtonShirts, O::Hoodies, O::Jackets, O::Sweaters, O::Legs, O::Shoes, O::Socks,
+                O::Glasses, O::Wrist, O::Necklaces, O::Rings, O::Boards, O::Trucks, O::Wheels,
+            ] {
+                for index in clothing_parts(&db, option, male, |part| part.attributes[7] == u16::MAX).unwrap() {
+                    let part = &db.parts[index];
+                    let mut record = fresh.clone();
+                    edit_skater_record::wear_part(&mut record, &db, part).unwrap();
+                    tried += 1;
+                    if let Err(error) = EditSkaterSession::build_character(&mounts, &db, &vault, &cvars, &mut record, &hierarchy) {
+                        failures.push(format!("{} {option:?} {:016x}/{:016x}: {error}", if male { "male" } else { "female" }, part.model_id, part.material_id));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{} of {tried} parts failed: {failures:#?}", failures.len());
+    }
+
+    #[test]
+    #[ignore = "requires original SKATE2_GAME_ROOT assets"]
+    fn every_board_truck_and_wheel_loads_in_the_editor() {
+        let (mounts, vault, cvars, db) = original_assets();
         let mut hierarchies = std::array::from_fn(|_| None);
         let mut failures = Vec::new();
         for male in [true, false] {
