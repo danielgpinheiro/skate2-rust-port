@@ -572,12 +572,12 @@ impl SelectedTickAi for SessionAiFrame<'_> {
 
 impl<T, C> SelectedSession<T, C> {
     /// The AI skaters' presentation entities, as the later players'.
-    pub(crate) fn ai_skater_visuals(&self, borrowed_players: &[u32]) -> Result<Vec<crate::SelectedSkaterVisual<'_>>, String> {
+    pub(crate) fn ai_skater_visuals(&self) -> Result<Vec<crate::SelectedSkaterVisual<'_>>, String> {
         let player = self.player_recipe_id();
         let mut visuals = Vec::with_capacity(self.ai_skaters.len());
         for skater in &self.ai_skaters {
-            let borrowed = borrowed_players.contains(&skater.player_index());
             let runtime = &skater.presentation_runtime;
+            let borrowed = runtime.borrowed();
             let Some(render) = runtime.render_opacity() else { continue };
             visuals.push(crate::SelectedSkaterVisual {
                 name_tag: None,
@@ -879,5 +879,14 @@ impl<T, C> SelectedSession<T, C> {
         }
         let skaters = std::mem::take(&mut self.ai_skaters);
         self.try_destroy_later_skaters(skaters)
+    }
+
+    /// `AISkaterManager::UnregisterAllSkaters` 0x824cb868 on the session's players.
+    pub(crate) fn try_unregister_all_ai_players(&mut self) -> Result<(), String> {
+        let settings = &self.player.as_ref().ok_or("AI: first player absent")?.selected.owners.services.settings;
+        match self.ai.as_ref() {
+            Some(ai) => ai.manager().unregister_all_skaters(settings),
+            None => Ok(()),
+        }
     }
 }

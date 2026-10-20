@@ -44,11 +44,12 @@ impl SkeletonNormalAssembly {
     pub(crate) fn clear_wipeout_truck_tilt(&mut self) {
         self.use_physics_truck_tilt = Some(false);
     }
-    /// Actual `Skeleton.DisableIK82d8ec14`, without changing other IK histories.
+    /// `Skeleton::DisableIK` 0x82b462f0, as WipeoutGround, LandingOnDeck and
+    /// `OffBoardFeetIK::ConsiderReset` call it.
     pub(crate) fn try_disable_wipeout_ik(
         &mut self,
     ) -> Result<(), crate::skeleton_current_animation::SkeletonIkUnconstructed> {
-        self.current_animation.try_set_ik_enabled(false)
+        self.current_animation.try_disable_ik()
     }
     /// `Skeleton.SetLinearDrag82b3ba38` forwards all Parts (-1) to Body.
     pub(crate) fn try_set_wipeout_linear_drag(

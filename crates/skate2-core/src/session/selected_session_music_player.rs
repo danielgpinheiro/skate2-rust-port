@@ -5,6 +5,7 @@ use crate::{
     edit_skater_profile::{AudioProfile, EditSkaterProfileStore},
     ui::{
         music_player::{self, profile_music_mode, Manager, MusicRequest},
+        online_config::OnlineConfig,
         options::{Action, Controller, ProfileSettings},
         pause_menu::PauseMenuInput,
     },
@@ -92,7 +93,8 @@ impl ProfileAudio {
     }
     /// `FrontEndState_Options::RequestExit` 0x82681700: the music player's `mbIsDirty` folds
     /// into `mIsDirty`, which saves the profile (`RequestSave(eBeMemcardSave_Profile)`) when no
-    /// main challenge runs or the game mode is Party Play.
+    /// main challenge runs or the game mode is Party Play. The PC rows save apart from it: the
+    /// display chunk, and Show Lobby Chat in `online-config.json`.
     fn request_options_exit(&mut self, options: &mut Controller, main_challenge: bool, party_play: bool) -> Result<(), SelectedLiveError> {
         let dirty = self.menu.take_dirty() | options.dirty();
         let path = EditSkaterProfileStore::default_path().map_err(error)?;
@@ -105,6 +107,9 @@ impl ProfileAudio {
             EditSkaterProfileStore::open(&path)
                 .and_then(|mut store| store.save_display_settings(options.snapshot().values))
                 .map_err(error)?;
+        }
+        if options.lobby_chat_dirty() {
+            OnlineConfig { show_lobby_chat: options.show_lobby_chat(), ..OnlineConfig::load() }.save().map_err(error)?;
         }
         options.close_after_save();
         Ok(())

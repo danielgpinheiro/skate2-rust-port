@@ -115,7 +115,8 @@ download a new release by hand.
 ## Each release
 
 1. Raise `version` in the workspace `Cargo.toml` (for example `0.1.0` to `0.2.0`).
-2. Build the game on Windows: `build-release.bat` (`target\release\skate2-pc.exe`).
+2. Build the game on Windows: `build-release.bat` (`target\release\skate2-pc.exe`). Its icon is
+   `apps/skate2-pc/skate2.ico`, which the game's `build.rs` links into the executable.
 3. Build the Linux game and server from the same files, `release-secret.txt` and
    `release-repository.txt` included: `build-release-linux.bat` runs `build-release.sh` in WSL,
    or run `./build-release.sh` on Linux. Both land in `dist/linux` (`skate2-pc`,

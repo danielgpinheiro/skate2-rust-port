@@ -10,8 +10,9 @@ the netcode and the Lobby Browser are the port's own.
 ## Running it
 
 - **Players** keep `online-config.json` in the save root: `nickname` (asked the first time
-  Online opens, or when the file's is not one the prompt could make; 1 to 24 printable ASCII
-  characters) and `server` (`host:port`, or a host name at the server's default port; empty or
+  Online opens, or when the file's is not one the prompt could make; 1 to 24 letters, digits,
+  spaces, `-`, `_` or `'`, at least one a letter or digit) and `server` (`host:port`, or a host
+  name at the server's default port; empty or
   absent for the build's default, which the game writes back as empty). Main
   menu > Online signs in; the Online options then offer Edit Nickname (the port's addition: the
   nickname prompt again, and a new nickname signs in again under it), Freeskate, Unranked (Quick
@@ -83,12 +84,24 @@ game's state:
   does (`GameJoined`); otherwise `PlayNowResult` says `FULL` or `NO_MATCH` (ended, private, or
   another version's).
 - **Sign-in**: a connection's first message must be its `Hello`, on the reliable channel, with a
-  nickname the game's prompt makes (`protocol::valid_nickname`: 1 to 24 printable ASCII
-  characters or spaces, none at either end); the game sends nothing else until it is welcomed
-  (it pings and acknowledges frames only once signed in). Any other message before it, another
-  nickname, or no hello within 10 seconds of the handshake drops the connection
-  (`leave::KICKED_BEFORE_SIGN_IN`, `KICKED_FOR_NICKNAME`), and so does any message, reliable or
-  not, that does not decode.
+  nickname the game's prompt makes (`protocol::valid_nickname`: 1 to 24 letters, digits, spaces,
+  `-`, `_` or `'`, at least one a letter or digit, no space at either end) and that holds no word
+  of the server's list (below); the game sends nothing else until it is welcomed (it pings and
+  acknowledges frames only once signed in). Any other message before it, another nickname, or no
+  hello within 10 seconds of the handshake drops the connection (`leave::KICKED_BEFORE_SIGN_IN`,
+  `KICKED_FOR_NICKNAME`), and so does any message, reliable or not, that does not decode. The game
+  shows "Nickname not permitted." for `KICKED_FOR_NICKNAME`, and its nickname prompt takes only
+  those characters.
+- **Word list** (`crates/skate2-net/src/words.rs`): `badwords.txt`, private to the server's host
+  (git ignores it, no release zip carries it and an update never replaces it), beside the
+  server's executable or, when only that one exists, in its working directory. One word or
+  phrase a line, `#` lines skipped; the server reads it again whenever it changes and logs at
+  start how many words it holds. A text and the entries are compared as `words::normalize` reads
+  them: lowercase; `1`, `!`, `|` and `l` read as `i`, `4` and `@` as `a`, `3` as `e`, `0` as `o`,
+  `5` and `$` as `s`, `7` as `t`, `8` as `b`, `6` and `9` as `g`; everything else but letters
+  dropped, spaces too; each run of one letter cut to one. A text holding an entry anywhere is
+  caught; an entry that reads as fewer than two letters is ignored. Without the file nothing is
+  filtered.
 - **Members**: the first member is the game host peer (the one with the host menus); when the
   host leaves the next member takes over. A member silent for 10 seconds is dropped; one that
   sends neither a replay frame nor `Busy` for 2 seconds (a frozen or paused game) is kicked for
@@ -415,8 +428,12 @@ to the lobby:
   that. Earlier lines are dropped.
 - A line the prompt cannot make (empty, over 200 characters, an edge space, anything but
   printable ASCII) drops the connection (`leave::KICKED_FOR_CHAT`); past 5 lines in 10 seconds a
-  member's lines are dropped. The server relays a line to every member, the sender too, and
-  logs it; the name shown is the server's, never the sender's.
+  member's lines are dropped, and so is a line holding a word of the server's list (the sender
+  stays connected and sees nothing). The server relays a line to every member, the sender too,
+  and logs it; the name shown is the server's, never the sender's.
+- Settings' Online Settings page (PC port addition, in the front end and in game) has Show Lobby
+  Chat, saved as `show_lobby_chat` in `online-config.json` and on by default. Off, T opens no
+  prompt and members' lines stay out of the event log; the change applies as the row turns.
 - `SKATE2_DIAGNOSTIC_ONLINE_CHAT=<line>` sends a line once the chat is enabled.
 
 ## What follows the original

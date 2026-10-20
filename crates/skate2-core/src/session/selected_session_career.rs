@@ -328,6 +328,10 @@ pub struct CareerHud {
     pub contacts:Option<crate::challenge::contacts::View>,
     pub can_show_phone_options:bool,
     pub phone_service_icons:[bool;3],
+    /// `PhonelistHUDData::MakeDirty` since the last take: `SetServiceIconStatus` (0x826b3748)
+    /// dirties the data on every call, so the minimized menu asks the HUD again.
+    pub phone_data_dirty:bool,
+    pub phone_alert_facts:crate::ui::phonelist::AlertFacts,
     pub pro_film_pro_name:String,
     pub frontend_arguments: FrontendArguments,
     pub hom_results:Option<crate::challenge::hom_results::HomResultsView>,
@@ -690,6 +694,8 @@ pub(crate) struct CareerSession {
     scene_source: Arc<CareerSceneSource>,
     /// The scene characters' renderables.
     scene_models: SceneCharacterModels,
+    /// A scene character borrowed the first player's entity at the last publication.
+    first_player_borrowed: bool,
     /// `FrontEndState_ChallengeMap` while the start hub's Map option has it on top.
     challenge_map: Option<crate::challenge::stuff_menu::ChallengeMap>,
     map_challenge_load: Option<MapChallengeLoad>,
@@ -801,6 +807,7 @@ impl CareerSession {
             nis,
             scene_source,
             scene_models: SceneCharacterModels::default(),
+            first_player_borrowed: false,
             challenge_map: None,
             map_challenge_load: None,
             movie: movie::CareerMovie::default(),
@@ -872,44 +879,61 @@ impl CareerSession {
         visuals
     }
 
-    /// The scene character borrowing the local skater ("current_player").
-    pub(super) fn borrowed_scene_character(&self) -> Option<&nis::characters::SceneCharacter> {
-        let local = self.system.world().local_player;
-        self.nis.scene_characters().iter().find(|c| c.borrowed && c.player.is_none_or(|p| p == local))
+    /// Whether a scene character borrowed the first player's entity at the last
+    /// [`Self::publish_borrowed_skaters`].
+    pub(super) const fn first_player_borrowed(&self) -> bool {
+        self.first_player_borrowed
     }
 
-    pub(super) fn borrowed_players(&self) -> Vec<u32> {
-        self.nis.scene_characters().iter().filter(|c| c.borrowed)
-            .filter_map(|c| c.player.and_then(|id| u32::try_from(id).ok())).collect()
+    /// `INetworkGameQuery::GetLocalPlayerID` (0 offline): the player id of the first player's skater.
+    fn first_player_id(&self) -> i32 {
+        crate::challenge::players::network_local_player(self.system.world())
     }
 
-    /// ControlCharacterRenderable82870fb0 changes each lent entity's pose callbacks.
+    /// ControlCharacterRenderable82870fb0 changes each lent entity's pose callbacks: a character
+    /// lent by player id poses that player's entity (`GetSkaterPresEntityFromPlayerId`
+    /// 0x82876aac), "current_player" the local index's, and an entity no character holds any
+    /// more answers the game's pose again.
     pub(super) fn publish_borrowed_skaters(&mut self,
-        mut local_runtime: Option<&mut crate::actor_face_playback::presentation::frame::selected_runtime::SelectedPresentationRuntime>,
+        mut first_runtime: Option<&mut crate::actor_face_playback::presentation::frame::selected_runtime::SelectedPresentationRuntime>,
         ai: &mut [crate::selected_session_boot_owner::party_skaters::PartySkater], party: &mut [crate::selected_session_boot_owner::party_skaters::PartySkater],
     ) -> Result<(), String> {
-        let local = self.system.world().local_player;
+        if let Some(runtime) = first_runtime.as_deref_mut() {
+            runtime.end_borrow();
+        }
+        for skater in ai.iter_mut().chain(party.iter_mut()) {
+            skater.presentation_runtime.end_borrow();
+        }
+        self.first_player_borrowed = false;
+        let first = self.first_player_id();
         let nis_time = self.nis.character_nis_time();
         for character in self.nis.scene_characters_mut().iter_mut().filter(|c| c.borrowed) {
-            let player = character.player.unwrap_or(local);
-            let runtime = if player == local { local_runtime.as_deref_mut() } else {
-                ai.iter_mut().chain(party.iter_mut())
-                    .find(|s| i32::try_from(s.player_index()).ok() == Some(player)).map(|s| &mut s.presentation_runtime)
+            let player = character.player.unwrap_or(first);
+            let later = ai.iter_mut().chain(party.iter_mut())
+                .find(|s| i32::try_from(s.player_index()).ok() == Some(player)).map(|s| &mut s.presentation_runtime);
+            let (runtime, first_player) = match later {
+                Some(runtime) => (runtime, false),
+                None if player == first => match first_runtime.as_deref_mut() {
+                    Some(runtime) => (runtime, true),
+                    None => continue,
+                },
+                None => continue,
             };
-            let Some(runtime) = runtime else { continue };
             if !character.has_render_entity()
                 && let Some(inverse_bind) = runtime.inverse_bind(character.anim.trajectory_bone())
             {
                 character.attach_render_entity(inverse_bind)?;
             }
             runtime.publish_borrowed(character, nis_time)?;
+            self.first_player_borrowed |= first_player;
         }
         Ok(())
     }
 
     pub(super) fn set_local_player(&self, recipe: Option<nis::characters::LocalPlayerRecipe>) {
         self.scene_source.set_local_player(recipe);
-        self.scene_source.set_local_player_id(self.system.world().local_player);
+        self.scene_source.set_local_player_id(self.first_player_id());
+        self.scene_source.set_local_index(self.system.world().local_player);
     }
 
     /// The NIS scene's view of the local player's render recipe: its schema
@@ -2084,6 +2108,21 @@ impl<T, C> SelectedLiveSession<T, C> {
         self.career.as_ref().is_some_and(|career| career.hud.poster.is_some() && !career.poster_blocked)
     }
 
+    /// The first four players' types, names and peers, for a diagnostic run.
+    pub fn diagnostic_player_rows(&self) -> Vec<(u32, String, i64)> {
+        let Some(player) = self.inner.player.as_ref() else { return Vec::new() };
+        let settings = &player.selected.owners.services.settings;
+        (0..4)
+            .map(|row| {
+                (
+                    settings.try_player_type(row).unwrap_or(0),
+                    settings.try_player_name(row).unwrap_or_default(),
+                    settings.try_peer_id(row).unwrap_or(-1),
+                )
+            })
+            .collect()
+    }
+
     /// Signs up the named challenge for a diagnostic run (`SKATE2_DIAGNOSTIC_CHALLENGE`).
     pub fn diagnostic_sign_up_challenge(&mut self, name: &str) -> bool {
         self.career.as_mut().is_some_and(|career| career.hud.poster.is_none()
@@ -2202,6 +2241,7 @@ impl<T, C> SelectedLiveSession<T, C> {
         let change_game_screen = std::mem::take(&mut career.hud.change_game_screen);
         let photo_select_screen = std::mem::take(&mut career.hud.photo_select_screen);
         let slappys_screen = std::mem::take(&mut career.hud.slappys_screen);
+        let phone_data_dirty = std::mem::take(&mut career.hud.phone_data_dirty);
         Some(CareerHud {
             profile_name: self.inner.player.as_ref().and_then(|player| player.selected.owners.services.profile.name()).unwrap_or_default(),
             sponsor_labels: crate::challenge::sponsors::frontend_sponsor_labels(career.system.world()),
@@ -2223,6 +2263,7 @@ impl<T, C> SelectedLiveSession<T, C> {
             change_game_screen,
             photo_select_screen,
             slappys_screen,
+            phone_data_dirty,
             // Options' ToggleSubtitles (0x8265c5e8) flips mSubtitles at once, in a challenge too.
             subtitles: self.audio.settings.subtitles,
             ..career.hud.clone()
@@ -2434,6 +2475,10 @@ impl<T, C> SelectedLiveSession<T, C> {
         career.hud.can_show_phone_options=crate::challenge::contacts::can_show_options(career.system.world());
         career.hud.phone_service_icons=career.system.world().hud.group("phonelist")
             .and_then(|g|g.phonelist.as_ref()).map_or([false;3],|p|p.show_icon);
+        career.hud.phone_alert_facts=crate::challenge::contacts::alert_facts(career.system.world());
+        if let Some(phone)=career.system.world_mut().hud.group_mut("phonelist").and_then(|g|g.phonelist.as_mut()) {
+            career.hud.phone_data_dirty|=std::mem::take(&mut phone.dirty);
+        }
         career.hud.pro_film_pro_name=career.system.world().competitors.pro_film_pro
             .and_then(|key|career.system.world().db.layout_text(0x9c86_9217_c5ae_e9b4,key,18))
             .unwrap_or_default().to_owned();
@@ -2776,16 +2821,11 @@ impl<T, C> SelectedLiveSession<T, C> {
             // on the presentation thread (GameModule::Render 0x827320f0).
             career.nis.set_game_camera(game_camera);
             if career.nis.replay_clock().is_none() {
-                career.nis.set_camera_anchor(
-                    self.inner.presentation_runtime.as_ref().and_then(|runtime| runtime.published_root()),
-                );
-                career.nis.set_camera_local_hips(
-                    self.inner.presentation_runtime.as_ref().and_then(|runtime| runtime.published_hips_position()),
-                );
-                career.nis.set_camera_local_hips_forward(
-                    self.inner.presentation_runtime.as_ref().and_then(|runtime| runtime.published_hips_forward()),
-                );
-                career.nis.set_local_bounds(self.inner.presentation_runtime.as_ref().and_then(|runtime| runtime.published_bounds()));
+                let local = self.inner.local_index_presentation().map_err(error)?;
+                career.nis.set_camera_anchor(local.and_then(|runtime| runtime.published_root()));
+                career.nis.set_camera_local_hips(local.and_then(|runtime| runtime.published_hips_position()));
+                career.nis.set_camera_local_hips_forward(local.and_then(|runtime| runtime.published_hips_forward()));
+                career.nis.set_local_bounds(local.and_then(|runtime| runtime.published_bounds()));
             }
             career.set_local_player(
                 self.inner

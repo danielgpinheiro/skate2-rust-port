@@ -263,13 +263,17 @@ impl SkeletonIk {
     ) -> Result<(), crate::skeleton_ik_state::set_target_normal::SetTargetNormalError> {
         self.state.try_set_foot_target_normal(left, normal, cvars)
     }
-    /// Source `Skeleton::EnableIK` 0x82b462e0; histories and targets survive.
     pub(crate) fn finish_skeleton_init(&mut self) {
         self.state.finish_skeleton_init();
     }
 
-    pub(crate) fn set_enabled(&mut self, enabled: bool) {
-        self.state.set_enabled(enabled);
+    /// Source `Skeleton::EnableIK` 0x82b462e0; histories and targets survive.
+    pub(crate) fn enable(&mut self) {
+        self.state.enable();
+    }
+    /// Source `Skeleton::DisableIK` 0x82b462f0; targets and contact histories survive.
+    pub(crate) fn disable(&mut self) {
+        self.state.disable();
     }
     pub(crate) fn data_in(&self) -> &SkeletonIkDataIn {
         &self.data_in

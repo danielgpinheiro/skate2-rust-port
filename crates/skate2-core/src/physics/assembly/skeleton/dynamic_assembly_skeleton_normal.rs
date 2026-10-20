@@ -257,7 +257,7 @@ impl SkeletonNormalAssembly {
     pub(crate) fn try_ground_entry_ik_and_tilt(
         &mut self,
     ) -> Result<(), crate::skeleton_current_animation::SkeletonIkUnconstructed> {
-        self.current_animation.try_set_ik_enabled(true)?;
+        self.current_animation.try_enable_ik()?;
         self.use_physics_truck_tilt = Some(false);
         Ok(())
     }
@@ -266,14 +266,14 @@ impl SkeletonNormalAssembly {
     pub(crate) fn try_enable_air_entry_ik(
         &mut self,
     ) -> Result<(), crate::skeleton_current_animation::SkeletonIkUnconstructed> {
-        self.current_animation.try_set_ik_enabled(true)
+        self.current_animation.try_enable_ik()
     }
     /// KnownAir.Enter writes truck tilt before invoking EnableIK.
     pub(crate) fn try_known_air_entry_ik_and_tilt(
         &mut self,
     ) -> Result<(), crate::skeleton_current_animation::SkeletonIkUnconstructed> {
         self.use_physics_truck_tilt = Some(false);
-        self.current_animation.try_set_ik_enabled(true)
+        self.current_animation.try_enable_ik()
     }
     /// DisableProxyVolume82b42068: byte3e43, folded empty OnEnd, then
     /// Body Part0 Volume flag bit0 and disable-count0. Reuse those same fields.

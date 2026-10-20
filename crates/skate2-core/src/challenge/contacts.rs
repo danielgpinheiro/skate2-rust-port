@@ -78,6 +78,21 @@ pub fn can_show_options(world:&World)->bool {
         && world.activities.main.is_none_or(|a|signup::challenge_type(world,a)==9)
 }
 
+/// PhonelistHUD::CanShowPhoneListAlerts826b5ea0: a single player game (IsSinglePlayerMode, the
+/// career or a free skate) whose uncapping service progression unlocked, with no main challenge.
+pub fn can_show_alerts(world:&World)->bool {
+    matches!(world.game_mode_flags,2|4) && services::message_setting(world,"Uncapping Available")
+        && world.activities.main.is_none()
+}
+
+/// The phone list HUD's alert facts: CanShowPhoneListAlerts and the settings GetSponsorPP826b6328
+/// and GetAnywhereFilmPP826b6428 read.
+pub fn alert_facts(world:&World)->crate::ui::phonelist::AlertFacts {
+    crate::ui::phonelist::AlertFacts {can_show_alerts:can_show_alerts(world),
+        sponsor_pinch_point:services::message_setting(world,"Sponsor PinchPoint"),
+        anywhere_film_pinch_point:services::message_setting(world,"Anywhere Film PinchPoint")}
+}
+
 impl Contacts {
     /// OnEnter826876b0: leaf collections, original unlock settings and order.
     pub fn open(world:&World, saving:bool)->Self {

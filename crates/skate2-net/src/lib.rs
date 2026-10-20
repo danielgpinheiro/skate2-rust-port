@@ -11,6 +11,7 @@ pub mod protocol;
 pub mod range;
 pub mod server;
 pub mod transport;
+pub mod words;
 
 #[cfg(test)]
 mod tests;

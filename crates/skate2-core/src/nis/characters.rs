@@ -68,6 +68,11 @@ pub trait SceneCharacterSource: Send + Sync {
     fn local_player_id(&self) -> Option<i32> {
         None
     }
+    /// `SkaterManager::GetLocalIndex`: the player the camera follows, whose entity
+    /// "current_player" borrows (`GetSkaterPresEntityFromIndex(GetLocalIndex())` 0x82876ee0).
+    fn local_index(&self) -> Option<i32> {
+        self.local_player_id()
+    }
     /// GetSkaterPresEntityFromPlayerId82876aac: any existing skater can be lent.
     fn player(&self, id: i32) -> Option<LocalPlayerRecipe> {
         (self.local_player_id() == Some(id)).then(|| self.local_player()).flatten()
@@ -473,7 +478,7 @@ pub fn instance_characters(
     source: &dyn SceneCharacterSource,
 ) -> Vec<SceneCharacter> {
     let local = source.local_player();
-    let local_id = source.local_player_id();
+    let local_index = source.local_index();
     let ratios = source.twist_ratios();
     let mut loaded: Vec<(String, Option<Arc<SceneAnimData>>)> = Vec::new();
     let mut face: Option<Option<AndaleDatabase>> = None;
@@ -499,7 +504,7 @@ pub fn instance_characters(
             }
         };
         let Some(data) = data else { continue };
-        let player_recipe = match lent {
+        let player_recipe = match lent.or(local_index) {
             Some(player) => source.player(player),
             None => local.clone(),
         };
@@ -527,7 +532,7 @@ pub fn instance_characters(
                 let slot = characters.len();
                 let location = locations.get(index).copied().unwrap_or(record.location);
                 let mut character = SceneCharacter::new(slot, schema, record.category.clone(), current_player, location, record.orientation, anim);
-                character.player = if current_player { lent.or(local_id) } else { None };
+                character.player = if current_player { lent.or(local_index) } else { None };
                 characters.push(character);
             }
             Err(error) => eprintln!("NIS: character {} left out: {error}", record.name),

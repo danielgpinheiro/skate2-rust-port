@@ -950,6 +950,26 @@ impl AiSkaterManager {
         Ok(Some(AmbientCommand::Spawn { slot, client_type: AiClientType::Challenge, recipe, transform, profile_name }))
     }
 
+    /// `UnregisterAllSkaters` 0x824cb868: each AI player's character recipe is unregistered and
+    /// cleared, then the player is removed, and the manager's view of it goes too.
+    pub(crate) fn unregister_all_skaters(&mut self, settings: &PlayersBackendSettings) -> std::result::Result<(), String> {
+        let error = |stage: &str, cause: &dyn std::fmt::Debug| format!("AI {stage}: {cause:?}");
+        for slot in 0..9 {
+            let player = u32::try_from(slot).map_err(|e| error("player", &e))?;
+            if !player_type::is_ai(settings.try_player_type(player).map_err(|e| error("player type", &e))?) {
+                continue;
+            }
+            let character = settings.try_character(player).map_err(|e| error("character", &e))?;
+            if character != u64::MAX {
+                self.assets.unregister_skater_recipe(character);
+                settings.try_set_character(player, u64::MAX).map_err(|e| error("character", &e))?;
+            }
+            settings.try_remove_player(player).map_err(|e| error("remove player", &e))?;
+            self.players[slot] = PlayerSlot::default();
+        }
+        Ok(())
+    }
+
     /// `UnspawnAISkater` 0x824cbc10 from the challenge system.
     pub(crate) fn unspawn_ai_skater_now(&mut self, slot: usize) -> Vec<AmbientCommand> {
         self.request_unspawn(slot)

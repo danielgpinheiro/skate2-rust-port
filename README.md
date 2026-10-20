@@ -1,12 +1,10 @@
 <div align="center">
 
-# Skate 2 Rust Port
-
-<img src="docs/images/online-lobby.png" alt="Skaters in an online lobby" width="720">
+# Skate 2 | Rust Port 🦀
 
 **Skate 2, rebuilt as a native PC game in Rust.**
 
-Windows · Linux · Steam Deck · Online play
+Windows · Linux · Online play
 
 [Download](https://github.com/skate6743/skate2-rust-port/releases/latest) ·
 [How to play](#how-to-play) ·
@@ -17,11 +15,16 @@ Windows · Linux · Steam Deck · Online play
 This isn't an emulator or a recompilation. The game's own systems (the skating physics,
 animation, the streaming city, challenges and audio) are reconstructed as readable Rust from
 Skate 2's Xbox 360 debug build of January 17, 2009 (`sk82_na_m.xex`), and run natively on your
-PC. Requires your own legally obtained Xbox 360 copy of Skate 2 to run, you will be prompted to choose ROM location at first startup.
+PC. Requires your own legally obtained Xbox 360 copy of Skate 2 to run, you will be prompted to choose ROM location during first startup.
 
 > [!NOTE]
 > **Work in progress.** Free skate, Party Play and online play are playable; the career is
 > mostly there. Expect some rough edges.
+
+## Screenshot
+<div align="center">
+<img src="docs/images/online-lobby.png" alt="Skaters in an online lobby" width="720">
+</div>
 
 ## Features
 
@@ -60,9 +63,8 @@ PC. Requires your own legally obtained Xbox 360 copy of Skate 2 to run, you will
 - Windows 10 or 11 (64-bit), or 64-bit Linux.
 - A processor with AVX2 (Intel since 2013, AMD since 2015) and a graphics card with DirectX 12
   or Vulkan.
-- **Your own copy of Skate 2 for Xbox 360**, extracted to a folder: the one that holds
-  `default.xex` and the game's `data` folder. A disc image has to be extracted first. The
-  retail game works; you don't need the debug build.
+- **Your own copy of retail Skate 2 for Xbox 360**, extracted to a folder: the one that holds
+  `default.xex` and the game's `data` folder. A disc image has to be extracted first.
 - A controller. Xbox and PlayStation controllers work on Windows; on Linux and the Steam Deck,
   every controller SDL3 knows works. Skating isn't playable on keyboard and mouse yet, but may be implemented later.
 
@@ -70,8 +72,7 @@ PC. Requires your own legally obtained Xbox 360 copy of Skate 2 to run, you will
 
 1. Download `skate2-windows-x64.zip` from the
    [latest release](https://github.com/skate6743/skate2-rust-port/releases/latest).
-2. Unzip it into a folder of your own, like `C:\Games\Skate 2`. Not Program Files: the game keeps
-   its settings and saves beside itself and updates itself in place.
+2. Unzip it into a folder of your own, for example `C:\Games\Skate 2`.
 3. Run `skate2-pc.exe`. If Windows says it protected your PC, choose **More info** and then
    **Run anyway**.
 4. The first time, select your copy's `default.xex`. The game remembers the folder.
@@ -91,7 +92,7 @@ Choose **Online** on the main menu and pick a nickname. Releases connect to the 
 server. To play on another one, set `"server": "host:port"` in `online-config.json` beside the
 game.
 
-**Hosting:** `skate2-pc --server <ip:port>` runs a dedicated server from the game, on Windows or
+**Hosting:** `skate2-pc --server <ip:port>` runs the game in dedicated server mode, on Windows or
 Linux. The Linux zip also holds `skate2-server`, the server alone, for a VPS or any machine
 without a display. Players join only a server of the same release; `--update` on either program
 puts the newest release in place.
@@ -111,10 +112,9 @@ AAC: put `ffmpeg.exe` (`ffmpeg` on Linux) beside the game, or on your `PATH`.
 ## Not done yet
 
 - [ ] Create-a-Spot
-- [ ] DLC
-- [ ] The full career, start to finish
-- [ ] Ranked online play, leaderboards and online profiles
-- [ ] Online Freeskate activities and sharing Skate.Reel videos online
+- [ ] DLC support (perhaps even being able to link Skate 3 data)
+- [ ] Ranked online play
+- [ ] Online Freeskate activities
 - [ ] Controller vibration
 
 ## Building from source

@@ -15,8 +15,8 @@ const CLEANUP: &str = "skate2-update.cleanup";
 /// The most a release's files may come to once unpacked.
 const MAX_UNPACKED: u64 = 4 << 30;
 /// Top-level names in the game's folder an update never replaces: the player's settings and
-/// saves, and the update's own files.
-const PROTECTED: [&str; 5] = ["config.json", "online-config.json", "saves", DOWNLOAD, CLEANUP];
+/// saves, the dedicated server's private word list, and the update's own files.
+const PROTECTED: [&str; 6] = ["config.json", "online-config.json", "saves", "badwords.txt", DOWNLOAD, CLEANUP];
 
 /// One file of the zip: where it goes, relative to the game's folder, and its unix mode.
 struct Entry {

@@ -75,7 +75,8 @@ pub mod leave {
     /// Asked what only the game's host may while another member was the host: the server
     /// dropped the connection.
     pub const KICKED_FOR_HOST_REQUEST: u8 = 6;
-    /// Signed in with a nickname the game's prompt cannot make.
+    /// Signed in with a nickname the server does not permit: one the game's prompt cannot make,
+    /// or one holding a word of the server's list (`badwords.txt`).
     pub const KICKED_FOR_NICKNAME: u8 = 7;
     /// Asked for something before signing in.
     pub const KICKED_BEFORE_SIGN_IN: u8 = 8;
@@ -97,14 +98,21 @@ pub mod refuse {
 /// The longest nickname, in characters: where the game's nickname prompt stops.
 pub const NICKNAME_CHARACTERS: usize = 24;
 
-/// Whether a nickname is one the game's prompt makes: 1 to 24 printable ASCII characters or
-/// spaces, none at either end (the game trims what was typed). The server drops a connection
-/// that signs in with any other.
+/// Whether a nickname may hold the character: a letter, a digit, a space, `-`, `_` or `'`.
+#[must_use]
+pub const fn nickname_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_' | '\'')
+}
+
+/// Whether a nickname is one the game's prompt makes: 1 to 24 [`nickname_character`]s, at least
+/// one a letter or a digit, no space at either end (the game trims what was typed). The server
+/// drops a connection that signs in with any other.
 #[must_use]
 pub fn valid_nickname(nickname: &str) -> bool {
     (1..=NICKNAME_CHARACTERS).contains(&nickname.len())
         && nickname.trim() == nickname
-        && nickname.bytes().all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        && nickname.chars().all(nickname_character)
+        && nickname.chars().any(|character| character.is_ascii_alphanumeric())
 }
 
 /// The longest chat line, in characters: where the game's chat prompt stops (PC port addition).
@@ -1019,6 +1027,18 @@ mod tests {
         ];
         for message in messages {
             assert_eq!(ServerMessage::decode(&message.encode()).unwrap(), message);
+        }
+    }
+
+    #[test]
+    fn nicknames_are_letters_digits_and_a_few_marks() {
+        let longest = "y".repeat(NICKNAME_CHARACTERS);
+        for name in ["Rob", "skater_99", "Mc'Gill", "the-kid", "Big Bob", "0", longest.as_str()] {
+            assert!(valid_nickname(name), "{name:?}");
+        }
+        let too_long = "y".repeat(NICKNAME_CHARACTERS + 1);
+        for name in ["", " Rob", "Rob ", "---", "_ '", "Rob!", "a.b", "Tab\tName", "Caf\u{e9}", too_long.as_str()] {
+            assert!(!valid_nickname(name), "{name:?}");
         }
     }
 

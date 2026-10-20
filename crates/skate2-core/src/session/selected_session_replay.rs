@@ -282,7 +282,7 @@ impl<T, C> SelectedLiveSession<T, C> {
         let identity=runtime.palette().map_err(error)?.identity();
         let local_skater=submission.skaters.iter().position(|s|s.palette_identity()==identity).unwrap_or(0);
         let mut roster=self.inner.party_skater_visuals().map_err(error)?;
-        roster.extend(self.inner.ai_skater_visuals(&self.career.as_ref().map(CareerSession::borrowed_players).unwrap_or_default()).map_err(error)?);
+        roster.extend(self.inner.ai_skater_visuals().map_err(error)?);
         let players_recipe=submission.skaters.iter().map(|s|roster.iter().find(|p|p.palette.identity()==s.palette_identity()).is_none_or(|p|p.players_recipe)).collect();
         let mut world=self.recorded_world_visuals()?;
         let previous=self.replay_frames.last_key_value().map(|(_,frame)|&frame.world);
@@ -397,14 +397,13 @@ pub(super) fn restore_game_cloth<T, C>(
     inner: &mut super::SelectedSession<T, C>,
     career: Option<&CareerSession>,
 ) -> Result<(), SelectedLiveError> {
-    if !career.is_some_and(|career| career.borrowed_scene_character().is_some())
+    if !career.is_some_and(CareerSession::first_player_borrowed)
         && let Some(runtime) = inner.presentation_runtime.as_mut()
     {
         runtime.restore_game_cloth().map_err(error)?;
     }
-    let borrowed = career.map(CareerSession::borrowed_players).unwrap_or_default();
     for skater in inner.party.iter_mut().chain(inner.ai_skaters.iter_mut()) {
-        if !borrowed.contains(&skater.player_index()) {
+        if !skater.presentation_runtime.borrowed() {
             skater.presentation_runtime.restore_game_cloth().map_err(error)?;
         }
     }

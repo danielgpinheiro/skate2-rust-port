@@ -158,6 +158,21 @@ impl PlayerAttributeServices {
         }
         Ok(())
     }
+    /// `PlayerLoaderImpl::ApplyPlayerAttributes` 0x828158f0 for a loaded skater outside its load:
+    /// a created skater's attributes from the profile's parts record, a marquee's from its
+    /// definition, then the local Actor's character reload.
+    pub(crate) fn apply_player_attributes(
+        &self,
+        selection: PlayerSelection,
+        player: u32,
+        record: Option<&skate2_formats::skater_profile::CacRecord>,
+    ) -> Result<(), PlayerAttributesError> {
+        if matches!(selection, PlayerSelection::CreateACharacter { .. }) {
+            let record = record.ok_or(PlayerAttributesError::CacPending)?;
+            return self.apply_cac_record(record, player).map(drop);
+        }
+        self.apply(selection, player)
+    }
     /// `ApplyPlayerAttributes` 0x828158f0's marquee writes: `SetPlayerCharacter`,
     /// `SetPlayerStance(IsSkaterRegular)` 0x82cfea68 and `SetHatType(GetSkaterHatType)`
     /// 0x82cfe9e8. Two independent generated wrappers, not a cached combined profile.

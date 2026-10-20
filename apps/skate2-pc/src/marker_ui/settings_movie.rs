@@ -287,6 +287,7 @@ fn options_row(assets: &Assets, state: &Snapshot, row: Row) -> RenderResult<Edit
             Row::GrindTransparency => on_off(state.grind_transparency),
             Row::MiniMap => on_off(state.mini_map),
             Row::Hud => on_off(state.hud),
+            Row::ShowLobbyChat => on_off(state.show_lobby_chat),
             // GetStringValue 0x82643d48: ID_GAMESETTINGS_CAMERA_HIGH for 1, _LOW for 0.
             Row::CameraAngle => if state.camera_high { "ID_GAMESETTINGS_CAMERA_HIGH" } else { "ID_GAMESETTINGS_CAMERA_LOW" },
             _ => match state.values.frame_rate_cap {

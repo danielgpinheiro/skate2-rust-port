@@ -318,7 +318,7 @@ impl<T, C> SelectedLiveSession<T, C> {
                     self.online_sign_in();
                     self.online_signing_in();
                 } else {
-                    self.online.nickname_prompt = Some(Prompt::nickname());
+                    self.online.nickname_prompt = Some(Prompt::nickname_replacing(&OnlineConfig::load().nickname));
                 }
             }
             Action::StartChallenge => self.online_start_challenge(),

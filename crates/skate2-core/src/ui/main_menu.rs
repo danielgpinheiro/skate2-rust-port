@@ -415,7 +415,7 @@ impl Controller {
                         Screen::ToPartyPlay => Screen::PartyPlay,
                         Screen::ToOnline=>{
                             if std::mem::take(&mut self.nickname_needed) {
-                                self.nickname_prompt=Some(super::profile_name::Prompt::nickname_with(&super::online_config::OnlineConfig::load().nickname));
+                                self.nickname_prompt=Some(super::profile_name::Prompt::nickname_replacing(&super::online_config::OnlineConfig::load().nickname));
                             }
                             Screen::Online
                         }

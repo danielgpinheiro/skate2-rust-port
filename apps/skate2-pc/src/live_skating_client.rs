@@ -573,20 +573,34 @@ impl ControlsDemo {
                 }
             }
             Self::HippySpin => {
-                // Pushes off, then every five seconds holds both push buttons for a hippy jump and
-                // releases them with the stick held right: from the wind-up on one jump of each
-                // pair, only in the air on the other. A push between jumps keeps the speed up.
+                // Pushes off, then every five seconds holds both push buttons for a hippy jump.
+                // SKATE2_HIPPY_STICK is the stick's X (default full right), SKATE2_HIPPY_WIND_UP
+                // how many frames the buttons are held (default 40) and SKATE2_HIPPY_SPIN the
+                // frames of each jump the stick is held, as start..end (default 40..100).
+                // A push between jumps keeps the speed up.
+                let env = |name: &str| std::env::var(name).ok();
+                let stick = env("SKATE2_HIPPY_STICK")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(i16::MAX);
+                let wind_up = env("SKATE2_HIPPY_WIND_UP")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(40);
+                let spin = env("SKATE2_HIPPY_SPIN")
+                    .and_then(|value| {
+                        let (start, end) = value.split_once("..")?;
+                        Some(start.parse().ok()?..end.parse().ok()?)
+                    })
+                    .unwrap_or(40..100);
                 if (30..150).contains(&frame) {
                     sample.buttons = 0x1000;
                 }
                 if frame >= 240 {
                     let phase = (frame - 240) % 300;
-                    let from_wind_up = (frame - 240) / 300 % 2 == 0;
-                    if phase < 40 {
+                    if phase < wind_up {
                         sample.buttons = 0x5000;
                     }
-                    if (if from_wind_up { 0..100 } else { 40..100 }).contains(&phase) {
-                        sample.left_x = i16::MAX;
+                    if spin.contains(&phase) {
+                        sample.left_x = stick;
                     }
                     if (220..260).contains(&phase) {
                         sample.buttons = 0x1000;
@@ -2159,14 +2173,25 @@ impl LiveSkatingClient {
                     // SKATE2_DIAGNOSTIC_PARTY_PLAY_QUIT: Start at the given tick, Quit and its Yes,
                     // then the main menu's free skate with its first skater, who pushes off;
                     // SKATE2_DIAGNOSTIC_PARTY_PLAY_QUIT_ROW=0 takes the career row instead.
+                    // SKATE2_DIAGNOSTIC_PARTY_PLAY_QUIT_PLAYER=<player> waits for that player's turn
+                    // before Start, and SKATE2_DIAGNOSTIC_PARTY_PLAY_QUIT_CHALLENGE=<challenge> signs
+                    // the challenge up in the game the quit reaches, then A on its poster and dialogs.
                     if let Some(quit)=std::env::var("SKATE2_DIAGNOSTIC_PARTY_PLAY_QUIT").ok().and_then(|tick|tick.parse::<u64>().ok())
                         && tick>=quit {
                         use skate2_core::ui::main_menu::Screen;
                         let row=std::env::var("SKATE2_DIAGNOSTIC_PARTY_PLAY_QUIT_ROW").ok().and_then(|row|row.parse::<usize>().ok()).unwrap_or(2);
                         (sample.buttons,sample.right_x,sample.right_y)=(0,0,0);
                         let pause=self.session.pause_menu_snapshot();
-                        if tick==quit {
+                        static QUIT_STARTED: AtomicBool=AtomicBool::new(false);
+                        let player=std::env::var("SKATE2_DIAGNOSTIC_PARTY_PLAY_QUIT_PLAYER").ok().and_then(|player|player.parse::<i32>().ok());
+                        let start=!QUIT_STARTED.load(Ordering::Relaxed)
+                            && player.is_none_or(|player|self.session.career_local_player()==Some(player) && !self.session.career_press_a_open());
+                        if start {
+                            QUIT_STARTED.store(true,Ordering::Relaxed);
+                            eprintln!("Party Play quit {tick}: Start on player {:?}'s turn", self.session.career_local_player());
                             sample.buttons=0x0010;
+                        } else if !QUIT_STARTED.load(Ordering::Relaxed) {
+                            if tick%60==0 && self.session.career_press_a_open() { sample.buttons=0x1000; }
                         } else if tick%30==0 && pause.visible {
                             sample.buttons=match pause.popup {
                                 Some((_, selected))=>if selected==1 {0x1000} else {0x0002},
@@ -2180,10 +2205,30 @@ impl LiveSkatingClient {
                                 Screen::FreeSkate if frame.freeskate.as_ref().is_some_and(|f|f.image.is_some()) => sample.buttons=0x1000,
                                 _ => {}
                             }
+                        } else if !self.party_quit_menu_seen && !pause.visible && self.session.career_local_player().is_some() {
+                            if tick%60==0 && self.session.career_press_a_open() {
+                                sample.buttons=0x1000;
+                            } else if tick%60==15 && !self.session.career_press_a_open() {
+                                sample.buttons=0x0010;
+                            }
                         } else if self.party_quit_menu_seen && self.session.main_menu_frame()?.is_none() && !pause.visible {
-                            if tick%20==0 { sample.buttons=0x1000; }
-                            if tick%100==0 && let Some((position,_))=self.session.map_player_pose() {
-                                eprintln!("Party Play quit {tick}: free skate at {position:?}");
+                            if let Ok(name)=std::env::var("SKATE2_DIAGNOSTIC_PARTY_PLAY_QUIT_CHALLENGE") {
+                                static SIGNED: AtomicBool=AtomicBool::new(false);
+                                if tick%60==0 && !SIGNED.load(Ordering::Relaxed) && self.session.diagnostic_sign_up_challenge(&name) {
+                                    eprintln!("Party Play quit {tick}: signed up {name}");
+                                    SIGNED.store(true,Ordering::Relaxed);
+                                }
+                                if tick%30==0 && (self.session.career_poster_ready() || self.session.career_press_a_open()) {
+                                    sample.buttons=0x1000;
+                                }
+                                if tick%60==0 {
+                                    eprintln!("Party Play quit {tick}: local {:?} players {:?}", self.session.career_local_player(), self.session.diagnostic_player_rows());
+                                }
+                            } else {
+                                if tick%20==0 { sample.buttons=0x1000; }
+                                if tick%100==0 && let Some((position,_))=self.session.map_player_pose() {
+                                    eprintln!("Party Play quit {tick}: free skate at {position:?}");
+                                }
                             }
                         }
                     }

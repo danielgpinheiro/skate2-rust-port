@@ -162,9 +162,6 @@ impl LandingOnDeck {
         if !greatest_plane_time(&relative, plane, up, &mut time, numeric).map_err(E::Numeric)?
             || !(time[0] > 0.0)
         {
-            if std::env::var_os("SKATE2_TRACE_HIPPY").is_some() {
-                eprintln!("hippy trace: deck plane query failed time {:.3}", time[0]);
-            }
             self.can_land = false;
             return Ok(());
         }
@@ -255,12 +252,6 @@ impl LandingOnDeck {
             if self.time_to_land > cvars.try_landing_min_jump_time().map_err(E::Cvar)? {
                 self.can_land = self.init_assisted_trajectory(velocity, cvars, numeric, overlay)?
                     < maximum_error;
-                if std::env::var_os("SKATE2_TRACE_HIPPY").is_some() {
-                    eprintln!(
-                        "hippy trace: assisted trajectory can land {} time to land {:.3}",
-                        self.can_land, self.time_to_land
-                    );
-                }
             }
             if self.can_land && !self.tested_trajectory {
                 self.tested_trajectory = true;
@@ -393,13 +384,6 @@ impl LandingOnDeck {
             overlay.require().map_err(E::Overlay)?;
         }
         self.something_in_the_way = blocked;
-        if std::env::var_os("SKATE2_TRACE_HIPPY").is_some() {
-            eprintln!(
-                "hippy trace: trajectory test blocked {blocked} hit {:?} end y {:.3}",
-                result.map(|result| result.position.xyz),
-                self.test_trajectory_end_y
-            );
-        }
         queries.try_release_trajectory(batch).map_err(E::Lease)?;
         self.trajectory_batch = None;
         Ok(())
@@ -481,22 +465,6 @@ impl LandingOnDeck {
         self.can_land = self.can_land
             && (self.landing_hippy_jump || self.flags()? & 0x40000 == 0)
             && self.is_board_upright()?;
-        if std::env::var_os("SKATE2_TRACE_HIPPY").is_some() {
-            eprintln!(
-                "hippy trace: deck manager error {:.3} {:.3?} max {maximum:.3} hippy {} flag {} upright {} in the way {} time to land {:.3} ideal {:.3} trajectory time {:.3} position {:.3?} velocity {:.3?}",
-                length_from_squared_and_estimate(squared, seed),
-                self.landing_error.xyz,
-                self.landing_hippy_jump,
-                self.flags()? & 0x40000 != 0,
-                self.is_board_upright()?,
-                self.something_in_the_way,
-                self.time_to_land,
-                self.ideal_time_to_land,
-                self.trajectory_time,
-                position.xyz,
-                velocity.xyz,
-            );
-        }
         if cvars.try_landing_debug().map_err(E::Cvar)? {
             overlay.require().map_err(E::Overlay)?;
             let _upright = self.is_board_upright::<N::Error>()?;

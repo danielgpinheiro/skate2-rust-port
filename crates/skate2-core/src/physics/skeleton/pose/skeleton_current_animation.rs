@@ -391,14 +391,19 @@ impl SkeletonCurrentAnimation {
         Ok(())
     }
 
-    pub(crate) fn try_set_ik_enabled(
-        &mut self,
-        enabled: bool,
-    ) -> Result<(), SkeletonIkUnconstructed> {
+    pub(crate) fn try_enable_ik(&mut self) -> Result<(), SkeletonIkUnconstructed> {
         self.ik_runtime
             .as_mut()
             .ok_or(SkeletonIkUnconstructed)?
-            .set_enabled(enabled);
+            .enable();
+        Ok(())
+    }
+
+    pub(crate) fn try_disable_ik(&mut self) -> Result<(), SkeletonIkUnconstructed> {
+        self.ik_runtime
+            .as_mut()
+            .ok_or(SkeletonIkUnconstructed)?
+            .disable();
         Ok(())
     }
 

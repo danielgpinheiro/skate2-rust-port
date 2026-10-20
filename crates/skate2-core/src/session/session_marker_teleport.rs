@@ -215,6 +215,9 @@ pub(crate) struct SessionMarkerTeleportQueues {
     game_sim: VecDeque<GameSimMessage>,
     /// PlayerUI+0xa0 `mFootForward`; the constructor stores RIGHT.
     player_ui_foot_forward: FootForward,
+    /// Whether the game's UI is a `PartyPlayUI` (`GameModule::ResetGame` 0x8273a680 makes one in
+    /// `GM_PartyPlay`), the only UI whose constructor (0x828aeae0) subscribes to `cMsgSetPlayer`.
+    party_play_ui: bool,
 }
 
 impl SessionMarkerTeleportQueues {
@@ -226,7 +229,13 @@ impl SessionMarkerTeleportQueues {
             flow: VecDeque::new(),
             game_sim: VecDeque::new(),
             player_ui_foot_forward: 0,
+            party_play_ui: false,
         }
+    }
+
+    /// The UI `ResetGame` makes for the game mode: a `PartyPlayUI` in `GM_PartyPlay`.
+    pub(crate) fn set_party_play_ui(&mut self, party_play: bool) {
+        self.party_play_ui = party_play;
     }
 
     /// `Flow::Manager::SendMessage`82576c90 appends under its lock.
@@ -304,8 +313,10 @@ impl SessionMarkerTeleportQueues {
                     self.player_ui_foot_forward = foot_forward;
                 }
                 GameSimMessage::SetPlayer(player) => {
-                    self.player_ui_foot_forward = receiver.set_player(player)?;
-                    player_index = player;
+                    if self.party_play_ui {
+                        self.player_ui_foot_forward = receiver.set_player(player)?;
+                        player_index = player;
+                    }
                 }
                 GameSimMessage::Pin(pin) => {
                     receiver.do_command(&EncodedGameInputCommand {

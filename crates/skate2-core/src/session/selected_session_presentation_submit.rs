@@ -32,8 +32,7 @@ impl<T, C> SelectedLiveSession<T, C> {
         let borrowed = self
             .career
             .as_ref()
-            .is_some_and(|career| career.borrowed_scene_character().is_some());
-        let borrowed_players = self.career.as_ref().map(super::career::CareerSession::borrowed_players).unwrap_or_default();
+            .is_some_and(super::career::CareerSession::first_player_borrowed);
         let inner = &mut self.inner;
         let world = inner.world.as_ref().ok_or_else(|| error("world absent"))?;
         let mut camera = world.local.try_camera_submission().map_err(error)?;
@@ -76,7 +75,7 @@ impl<T, C> SelectedLiveSession<T, C> {
             skaters.push(frame);
         }
         for skater in inner.party.iter_mut().chain(inner.ai_skaters.iter_mut()) {
-            if borrowed_players.contains(&skater.player_index()) { continue; }
+            if skater.presentation_runtime.borrowed() { continue; }
             if let Some(frame) = skater
                 .presentation_runtime
                 .submitted_frame(&skater.presentation, &vault)

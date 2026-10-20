@@ -110,6 +110,16 @@ impl<T, C> SelectedSession<T, C> {
         self.local_skater_among(&self.ai_skaters)
     }
 
+    /// The presentation `SkaterPresentation::GetLocalIndex` names, which the ICE camera anchors
+    /// read (`User_ICECameraAnchor::GetPosition` 0x826cfd04): the local presented skater's, else
+    /// the first player's.
+    pub(crate) fn local_index_presentation(&self) -> Result<Option<&SelectedPresentationRuntime>, String> {
+        Ok(match self.local_presented_skater()? {
+            Some(skater) => Some(&skater.presentation_runtime),
+            None => self.presentation_runtime.as_ref(),
+        })
+    }
+
     fn local_skater_among<'a>(&self, skaters: &'a [PartySkater]) -> Result<Option<&'a PartySkater>, String> {
         let identity = self
             .world
@@ -253,16 +263,18 @@ impl<T, C> SelectedSession<T, C> {
         let mut visuals = Vec::with_capacity(self.party.len());
         for skater in &self.party {
             let runtime = &skater.presentation_runtime;
+            let borrowed = runtime.borrowed();
             let Some(render) = runtime.render_opacity() else { continue };
             visuals.push(crate::SelectedSkaterVisual {
                 name_tag: None,
                 palette: runtime.palette().map_err(|e| error("palette", e))?,
                 materials: Arc::clone(runtime.materials().map_err(|e| error("materials", e))?),
-                hips_position: runtime.published_hips_position().ok_or("party skater hips unpublished")?,
+                hips_position: (if borrowed { runtime.borrowed_hips_position() } else { runtime.published_hips_position() })
+                    .ok_or("party skater hips unpublished")?,
                 world_bounds: runtime.published_bounds().ok_or("party skater bounds unpublished")?,
-                opacity: render.opacity,
-                ghosted: render.ghosted,
-                entity_type: 0x122,
+                opacity: if borrowed { 1.0 } else { render.opacity },
+                ghosted: render.ghosted && !borrowed,
+                entity_type: if borrowed { 0x822 } else { 0x122 },
                 players_recipe: skater.recipe_load.asset_id() == player,
             });
         }

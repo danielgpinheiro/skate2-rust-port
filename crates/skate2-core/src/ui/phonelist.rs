@@ -92,6 +92,52 @@ impl PhoneListData {
         self.notification = MarkerNotification::TryUse;
         self.dirty = true;
     }
+    /// `hudphonelist.UpdateMinimizedMenu`. The service icons the HUD answers fill the two slots
+    /// in security, pool drain, uncapping order (`GetServiceIconStatus` 0x826b5f90: the data's
+    /// icon, then `CanShowPhoneListAlerts`). Without one, the anywhere film's alert shows, else the
+    /// sponsorship's (`GetAnywhereFilmPP` 0x826b6428, `GetSponsorPP` 0x826b6328); without either,
+    /// the menu hides.
+    #[must_use]
+    pub fn minimized_menu(&self, facts: AlertFacts) -> MinimizedMenu {
+        const LABELS: [&str; 3] = ["bb", "sammis", "mikes"];
+        let mut services = self.service_icons.map(|shown| shown && facts.can_show_alerts);
+        if services.contains(&true) {
+            return MinimizedMenu::Services(std::array::from_fn(|_| {
+                let Some(icon) = services.iter().position(|&shown| shown) else { return "off" };
+                services[icon] = false;
+                LABELS[icon]
+            }));
+        }
+        if facts.anywhere_film_pinch_point && facts.can_show_alerts {
+            MinimizedMenu::Alert("ID_PHONELIST_ANYWHERE_ALERT")
+        } else if facts.sponsor_pinch_point && facts.can_show_alerts {
+            MinimizedMenu::Alert("ID_PHONELIST_SPONSORSHIP_ALERT")
+        } else {
+            MinimizedMenu::Hidden
+        }
+    }
+}
+
+/// The game's side of `PhonelistHUD`'s alerts: `CanShowPhoneListAlerts` (0x826b5ea0) and the
+/// `Sponsor PinchPoint` and `Anywhere Film PinchPoint` settings `GetSponsorPP` and
+/// `GetAnywhereFilmPP` read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AlertFacts {
+    pub can_show_alerts: bool,
+    pub sponsor_pinch_point: bool,
+    pub anywhere_film_pinch_point: bool,
+}
+
+/// What `UpdateMinimizedMenu` makes of the quick menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MinimizedMenu {
+    /// `minimized`, the alert line hidden, each icon slot at its label (`bb`, `sammis`, `mikes`
+    /// or `off`).
+    Services([&'static str; 2]),
+    /// `minimized`, the alert line showing this text and both icon slots `off`.
+    Alert(&'static str),
+    /// `hidden`.
+    Hidden,
 }
 
 /// Side effects go through the same screen/HUD owners as the native component.
@@ -357,6 +403,22 @@ mod tests {
         hud.update(Some(&mut data), ctx, &mut commands);
         assert!(commands.is_empty());
         assert_eq!(data.notification, MarkerNotification::Idle);
+    }
+    #[test]
+    fn minimized_menu_fills_its_two_slots_in_service_order_then_shows_an_alert() {
+        let all = AlertFacts { can_show_alerts: true, sponsor_pinch_point: true, anywhere_film_pinch_point: true };
+        let icons = |service_icons| PhoneListData { service_icons, ..PhoneListData::default() };
+        assert_eq!(icons([false, false, true]).minimized_menu(all), MinimizedMenu::Services(["mikes", "off"]));
+        assert_eq!(icons([true, false, true]).minimized_menu(all), MinimizedMenu::Services(["bb", "mikes"]));
+        assert_eq!(icons([true, true, false]).minimized_menu(all), MinimizedMenu::Services(["bb", "sammis"]));
+        // No icon: the anywhere film's alert goes before the sponsorship's.
+        assert_eq!(icons([false; 3]).minimized_menu(all), MinimizedMenu::Alert("ID_PHONELIST_ANYWHERE_ALERT"));
+        let sponsor = AlertFacts { anywhere_film_pinch_point: false, ..all };
+        assert_eq!(icons([false; 3]).minimized_menu(sponsor), MinimizedMenu::Alert("ID_PHONELIST_SPONSORSHIP_ALERT"));
+        // CanShowPhoneListAlerts gates icons and alerts alike.
+        let gated = AlertFacts { can_show_alerts: false, ..all };
+        assert_eq!(icons([true, false, true]).minimized_menu(gated), MinimizedMenu::Hidden);
+        assert_eq!(icons([false; 3]).minimized_menu(AlertFacts { can_show_alerts: true, ..AlertFacts::default() }), MinimizedMenu::Hidden);
     }
     #[test]
     fn minimized_and_hidden_preserve_native_notification_lifetime() {

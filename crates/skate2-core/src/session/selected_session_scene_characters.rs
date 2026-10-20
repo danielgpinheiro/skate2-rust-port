@@ -29,12 +29,20 @@ pub(crate) struct CareerSceneSource {
     ratios: TwistRatios,
     local: Mutex<Option<LocalPlayerRecipe>>,
     local_id: Mutex<Option<i32>>,
+    local_index: Mutex<Option<i32>>,
     players: Mutex<std::collections::BTreeMap<i32, LocalPlayerRecipe>>,
 }
 
 impl CareerSceneSource {
     pub(crate) fn new(mounts: Arc<MountSet>, ratios: TwistRatios) -> Self {
-        Self { mounts, ratios, local: Mutex::new(None), local_id: Mutex::new(None), players: Mutex::new(Default::default()) }
+        Self {
+            mounts,
+            ratios,
+            local: Mutex::new(None),
+            local_id: Mutex::new(None),
+            local_index: Mutex::new(None),
+            players: Mutex::new(Default::default()),
+        }
     }
 
     pub(crate) fn set_local_player(&self, recipe: Option<LocalPlayerRecipe>) {
@@ -47,10 +55,17 @@ impl CareerSceneSource {
         if let Ok(mut current) = self.players.lock() { *current = players.collect(); }
     }
 
-    /// The challenge system's local player (`cMsgLocalSkaterChanged`).
+    /// `INetworkGameQuery::GetLocalPlayerID`: this console's player, the first player's skater.
     pub(crate) fn set_local_player_id(&self, id: i32) {
         if let Ok(mut local) = self.local_id.lock() {
             *local = Some(id);
+        }
+    }
+
+    /// `SkaterManager::GetLocalIndex` as the challenge system last set it (`cMsgLocalSkaterChanged`).
+    pub(crate) fn set_local_index(&self, index: i32) {
+        if let Ok(mut local) = self.local_index.lock() {
+            *local = Some(index);
         }
     }
 }
@@ -70,6 +85,9 @@ impl SceneCharacterSource for CareerSceneSource {
 
     fn local_player_id(&self) -> Option<i32> {
         self.local_id.lock().ok().and_then(|local| *local)
+    }
+    fn local_index(&self) -> Option<i32> {
+        self.local_index.lock().ok().and_then(|local| *local)
     }
     fn player(&self, id: i32) -> Option<LocalPlayerRecipe> {
         if self.local_player_id() == Some(id) { self.local_player() }

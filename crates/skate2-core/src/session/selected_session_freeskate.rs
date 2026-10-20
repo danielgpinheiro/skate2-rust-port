@@ -125,6 +125,7 @@ impl<T, C> SelectedLiveSession<T, C> {
         }
         self.freeskate.settings = game.settings;
         self.set_game_mode(GM_PROFILE_FREE_SKATE, Some(game.settings))?;
+        self.start_single_player_players()?;
         self.career = None;
         self.freeroam_replay.reset();
         self.freeroam_replay_frame=0;
@@ -198,6 +199,7 @@ impl<T, C> SelectedLiveSession<T, C> {
     /// from the hub replaces.
     pub(super) fn unload_game(&mut self) -> Result<(), SelectedLiveError> {
         use crate::session_marker::teleport::PlayerUiTeleportReceiver as _;
+        self.unload_players()?;
         let owner = self.inner.world.as_ref().ok_or_else(|| error("world absent"))?;
         let local = owner
             .world
@@ -225,10 +227,6 @@ impl<T, C> SelectedLiveSession<T, C> {
         self.freeskate.spawn_attributes_pending = false;
         self.inner.try_destroy_party_skaters().map_err(error)?;
         self.inner.try_destroy_ai_skaters().map_err(error)?;
-        // UnloadGameState's ResetPlayers (0x82757dcc) comes before ResetGame.
-        if let Some(player) = self.inner.player.as_ref() {
-            player.selected.owners.services.settings.try_reset_scoring().map_err(error)?;
-        }
         // ResetGame8273d994 -> Simulation::Reset8289effc also resets the
         // living world. Challenge unload alone leaves ambient pedestrians
         // with command streams from a roster that the unload has changed.
@@ -251,10 +249,73 @@ impl<T, C> SelectedLiveSession<T, C> {
         std::mem::take(&mut self.game_unloaded)
     }
 
+    /// `UnloadGameState`'s players before its `ResetGame`: `AISkaterManager::UnregisterAllSkaters`,
+    /// `ResetPlayers`, then player 0 again (`CreatePlayer(0, PT_Human, -1)`, named for the game
+    /// that is still in its mode) on the controller it had.
+    fn unload_players(&mut self) -> Result<(), SelectedLiveError> {
+        let Some(player) = self.inner.player.as_ref() else { return Ok(()) };
+        let settings = Arc::clone(&player.selected.owners.services.settings);
+        self.inner.try_unregister_all_ai_players().map_err(error)?;
+        let controller = settings.try_controller_index(0).map_err(error)?;
+        settings.try_reset_players().map_err(error)?;
+        self.create_first_human()?;
+        settings.try_set_controller_index(0, controller).map_err(error)
+    }
+
+    /// `CreatePlayer(0, PT_Human, -1)` 0x82563d50, whose `UpdatePlayerName` 0x82563a88 names a
+    /// human by the game mode: Party Play's player name, otherwise the profile's.
+    fn create_first_human(&self) -> Result<(), SelectedLiveError> {
+        let services = &self.inner.player.as_ref().ok_or_else(|| error("first player absent"))?.selected.owners.services;
+        if services.skaters.backend().try_game_mode().map_err(error)? == GM_PARTY_PLAY {
+            let name = self.party_player_name(0)?;
+            services.settings.try_create_party_human(0, crate::player::NO_PEER_ID, name.as_bytes()).map_err(error)
+        } else {
+            services.settings.try_create_offline_human(0, &services.profile, services.skaters.backend()).map_err(error)
+        }
+    }
+
+    /// `StateMainGameFlow::DoStartSinglePlayerGame` 0x8277b070 outside Party Play, as a game
+    /// starts: the AI players go, `ResetPlayers`, player 0 again with the profile's name, the
+    /// loaded skater's attributes again (`ApplyPlayerAttributes(0)`, and slot 8's with ghosts),
+    /// and the front end's controller, the PC pad 0, for player 0.
+    pub(super) fn start_single_player_players(&mut self) -> Result<(), SelectedLiveError> {
+        self.inner.try_unregister_all_ai_players().map_err(error)?;
+        let services = &self.inner.player.as_ref().ok_or_else(|| error("single player absent"))?.selected.owners.services;
+        services.settings.try_reset_players().map_err(error)?;
+        self.create_first_human()?;
+        let player = self.inner.player.as_ref().ok_or_else(|| error("single player absent"))?;
+        let (loader, services) = (&player.selected.owners.loader, &player.selected.owners.services);
+        let mut regular = None;
+        if matches!(loader.phase(), PlayerLoadPhase::Loaded { .. })
+            && let Some(selection) = loader.current()
+        {
+            let record = if matches!(selection, PlayerSelection::CreateACharacter { .. }) {
+                EditSkaterProfileStore::open(EditSkaterProfileStore::default_path().map_err(error)?)
+                    .map_err(error)?
+                    .load_record()
+                    .map_err(error)?
+            } else {
+                None
+            };
+            services.apply_player_attributes(selection, 0, record.as_ref()).map_err(error)?;
+            if services.skaters.backend().try_ghost_enabled().map_err(error)? {
+                services.apply_player_attributes(selection, 8, record.as_ref()).map_err(error)?;
+            }
+            regular = Some(services.settings.try_stance_byte(0).map_err(error)? != 0);
+        }
+        services.settings.try_set_controller_index(0, 0).map_err(error)?;
+        // ApplyPlayerAttributes' ReloadLocalPlayerAttributeData: the PlayerUI's stance.
+        if let (Some(regular), Some(marker)) = (regular, self.inner.session_marker.as_mut()) {
+            marker.teleport.reload_stance(regular);
+        }
+        Ok(())
+    }
+
     /// `FrontEndState_MainMenu::EnterGame`826788b0's single-player start: `GM_SinglePlayer` with
     /// the created skater.
     pub(super) fn enter_single_player(&mut self) -> Result<(), SelectedLiveError> {
         self.set_game_mode(GM_SINGLE_PLAYER, None)?;
+        self.start_single_player_players()?;
         self.pause_menu.set_hub(crate::ui::pause_menu::StartHub::SinglePlayer);
         self.load_created_skater()
     }
@@ -368,6 +429,7 @@ impl<T, C> SelectedLiveSession<T, C> {
             }
             let net_challenge_type = self.online.game.as_ref().map(|game| game.attributes.challenge_type);
             marker.try_reset_game(mode, net_challenge_type).map_err(error)?;
+            marker.teleport.set_party_play_ui(mode == GM_PARTY_PLAY);
             marker.prop_actions.clear();
             marker.restore_props=false;
         }

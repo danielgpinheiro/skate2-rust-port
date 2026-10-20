@@ -72,6 +72,7 @@ pub(super) const fn notice_text(notice: &OnlineNotice) -> &'static str {
         OnlineNotice::Disconnected => "ID_ONLINE_GAME_LEFT",
         OnlineNotice::Kicked => "ID_ONLINE_KICKED_BY_GAME_HOST",
         OnlineNotice::UpdateRequired => "#Your game doesn't match the server's version. Update the game to play online.",
+        OnlineNotice::NicknameNotPermitted => "#Nickname not permitted.",
     }
 }
 

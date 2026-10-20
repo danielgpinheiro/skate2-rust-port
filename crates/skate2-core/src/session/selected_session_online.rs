@@ -79,6 +79,9 @@ pub enum OnlineNotice {
     /// The server is another build of the game (`refuse::BUILD`, `refuse::VERSION`): the game has
     /// to update. The original had no such notice (Xbox LIVE updated the title).
     UpdateRequired,
+    /// The server does not take the nickname (`leave::KICKED_FOR_NICKNAME`): one with a word of its
+    /// list. PC port addition, as the nickname is.
+    NicknameNotPermitted,
 }
 
 /// A player of the game.
@@ -316,6 +319,7 @@ impl<T, C> SelectedLiveSession<T, C> {
                 ClientEvent::Disconnected(reason) => {
                     trace(format_args!("disconnected: {reason:?} (build {})", skate2_net::crypto::Build::current().id()));
                     let update = matches!(reason, Disconnect::Refused(refuse::BUILD | refuse::VERSION));
+                    let nickname = reason == Disconnect::Closed(skate2_net::protocol::leave::KICKED_FOR_NICKNAME);
                     let had_game = self.online.game.is_some();
                     self.online.client = None;
                     self.online.searching = None;
@@ -324,7 +328,13 @@ impl<T, C> SelectedLiveSession<T, C> {
                     if had_game {
                         self.online_game_lost(OnlineNotice::Disconnected)?;
                     } else {
-                        self.online.notices.push(if update { OnlineNotice::UpdateRequired } else { OnlineNotice::SignInFailed });
+                        self.online.notices.push(if update {
+                            OnlineNotice::UpdateRequired
+                        } else if nickname {
+                            OnlineNotice::NicknameNotPermitted
+                        } else {
+                            OnlineNotice::SignInFailed
+                        });
                     }
                     // The server takes another version: look for it again and offer it again,
                     // even if the player said No to it.
@@ -420,9 +430,12 @@ impl<T, C> SelectedLiveSession<T, C> {
     }
 
     /// T (PC port addition): the chat prompt opens in the game's world once the server enabled the
-    /// player's chat.
+    /// player's chat, unless Show Lobby Chat is off.
     pub fn online_open_chat(&mut self) {
-        if self.online.chat.is_none() && self.online.game.as_ref().is_some_and(|game| game.entered && game.chat_enabled) {
+        if self.online.chat.is_none()
+            && self.options_menu.show_lobby_chat()
+            && self.online.game.as_ref().is_some_and(|game| game.entered && game.chat_enabled)
+        {
             self.online.chat = Some(ChatPrompt::default());
         }
     }
@@ -483,8 +496,12 @@ impl<T, C> SelectedLiveSession<T, C> {
         }
     }
 
-    /// A member's chat line from the server, into the event log as `[name]: line`.
+    /// A member's chat line from the server, into the event log as `[name]: line`; with Show
+    /// Lobby Chat off, nowhere.
     fn online_chat(&mut self, user_id: u64, text: &str) {
+        if !self.options_menu.show_lobby_chat() {
+            return;
+        }
         let Some(game) = self.online.game.as_ref() else { return };
         let Some(player) = game.players.iter().find(|player| player.user_id == user_id) else { return };
         if !valid_chat(text) {
@@ -843,6 +860,7 @@ impl<T, C> SelectedLiveSession<T, C> {
 
     pub(super) fn start_online_game(&mut self, start: [f32; 16]) -> Result<(), SelectedLiveError> {
         self.set_game_mode(GM_ONLINE_FREE_SKATE, None)?;
+        self.start_single_player_players()?;
         self.career = None;
         self.online.dmos.begin_game();
         self.freeroam_replay.reset();

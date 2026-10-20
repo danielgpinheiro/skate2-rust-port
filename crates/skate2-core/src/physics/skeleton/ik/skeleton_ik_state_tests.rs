@@ -203,14 +203,52 @@ fn skeleton_init_resets_modes_and_two_blends_without_replaying_full_ik_reset() {
 }
 
 #[test]
+fn disable_clears_each_entrys_blends_and_mode_but_keeps_targets_and_contacts() {
+    let mut state = state();
+    state.modes = [1, 1, 2, 3];
+    state.on_deck_blends = [1.0, 1.0, 0.5, 0.25];
+    state.external_blends = [0.75; 4];
+    state.target_blends = [0.25; 4];
+    state.contact_offsets = [1.0, 2.0, 3.0, 4.0];
+    state.contact_states = [7, 6, 5, 4];
+    state.external_target_set = [true; 4];
+    state.disable();
+    assert!(!state.do_ik());
+    assert_eq!(state.modes, [0; 4]);
+    assert_eq!(state.on_deck_blends.map(f32::to_bits), [0; 4]);
+    assert_eq!(state.external_blends.map(f32::to_bits), [0; 4]);
+    assert_eq!(
+        state.target_blends.map(f32::to_bits),
+        [0.25_f32.to_bits(); 4]
+    );
+    assert_eq!(
+        state.contact_offsets.map(f32::to_bits),
+        [1.0_f32, 2.0, 3.0, 4.0].map(f32::to_bits)
+    );
+    assert_eq!(state.contact_states, [7, 6, 5, 4]);
+    assert_eq!(state.external_target_set, [true; 4]);
+}
+
+#[test]
+fn disabled_feet_leave_on_deck_ik_at_once() {
+    let mut state = state();
+    state.modes = [1, 1, 0, 0];
+    state.on_deck_blends = [1.0, 1.0, 0.0, 0.0];
+    state.disable();
+    state.update_status(0);
+    assert_eq!(state.modes, [0; 4]);
+    assert_eq!(state.on_deck_blends.map(f32::to_bits), [0; 4]);
+}
+
+#[test]
 fn enable_changes_only_retained_flag_preserving_contact_and_blend_histories() {
     let mut state = state();
-    state.set_enabled(false);
+    state.disable();
     state.modes = [3, 2, 1, 4];
     state.contact_offsets = [1.0, 2.0, 3.0, 4.0];
     state.on_deck_blends = [0.1, 0.2, 0.3, 0.4];
     state.contact_states = [7, 6, 5, 4];
-    state.set_enabled(true);
+    state.enable();
     assert!(state.do_ik());
     assert_eq!(state.modes, [3, 2, 1, 4]);
     assert_eq!(

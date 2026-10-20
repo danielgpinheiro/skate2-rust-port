@@ -1331,6 +1331,7 @@ impl<T, C> SelectedLiveSession<T, C> {
             .map_err(|e| SelectedLiveError::failed(Stage::BootPrefix, e))?;
         self.options_menu.load(profile.load_display_settings()
             .map_err(|e| SelectedLiveError::failed(Stage::BootPrefix, e))?);
+        self.options_menu.load_lobby_chat(crate::ui::online_config::OnlineConfig::load().show_lobby_chat);
         self.audio.settings = profile.load_settings().map_err(|e| SelectedLiveError::failed(Stage::BootPrefix, e))?;
         self.audio.new_profile = profile.is_new_profile().map_err(|e| SelectedLiveError::failed(Stage::BootPrefix, e))?;
         let SelectedControlledBootPolicy {
@@ -2471,16 +2472,11 @@ impl<T, C> SelectedLiveSession<T, C> {
                 // (`update_replay_view`): SkaterPresEntity::GetPosition asks the entity the
                 // recorded frames restored.
                 if career.nis.replay_clock().is_none() {
-                    career.nis.set_camera_anchor(
-                        self.inner.presentation_runtime.as_ref().and_then(|runtime| runtime.published_root()),
-                    );
-                    career.nis.set_camera_local_hips(
-                        self.inner.presentation_runtime.as_ref().and_then(|runtime| runtime.published_hips_position()),
-                    );
-                    career.nis.set_camera_local_hips_forward(
-                        self.inner.presentation_runtime.as_ref().and_then(|runtime| runtime.published_hips_forward()),
-                    );
-                    career.nis.set_local_bounds(self.inner.presentation_runtime.as_ref().and_then(|runtime| runtime.published_bounds()));
+                    let local = self.inner.local_index_presentation().map_err(|e| SelectedLiveError::failed(Stage::Visual, e))?;
+                    career.nis.set_camera_anchor(local.and_then(|runtime| runtime.published_root()));
+                    career.nis.set_camera_local_hips(local.and_then(|runtime| runtime.published_hips_position()));
+                    career.nis.set_camera_local_hips_forward(local.and_then(|runtime| runtime.published_hips_forward()));
+                    career.nis.set_local_bounds(local.and_then(|runtime| runtime.published_bounds()));
                 }
                 career.set_local_player(
                     self.inner
@@ -4328,7 +4324,7 @@ impl<T, C> SelectedLiveSession<T, C> {
                 SelectedLivePending::FrameNotReady,
             ))?
             .cvars;
-        let borrowed = self.career.as_ref().is_some_and(|career| career.borrowed_scene_character().is_some());
+        let borrowed = self.career.as_ref().is_some_and(career::CareerSession::first_player_borrowed);
         // SkaterPresEntity::GetPosition (0x827d79c0) asks the entity's
         // callbacks: the scene's while it is borrowed.
         let skater_hips_position = if borrowed { runtime.borrowed_hips_position() } else { runtime.published_hips_position() }
@@ -4405,7 +4401,7 @@ impl<T, C> SelectedLiveSession<T, C> {
             scene_characters: self.career.as_ref().map(career::CareerSession::scene_visuals).unwrap_or_default(),
             party_skaters: {
                 let mut skaters = self.inner.party_skater_visuals().map_err(|e| SelectedLiveError::failed(Stage::Visual, e))?;
-                skaters.extend(self.inner.ai_skater_visuals(&self.career.as_ref().map(career::CareerSession::borrowed_players).unwrap_or_default()).map_err(|e| SelectedLiveError::failed(Stage::Visual, e))?);
+                skaters.extend(self.inner.ai_skater_visuals().map_err(|e| SelectedLiveError::failed(Stage::Visual, e))?);
                 skaters.extend(self.online_visuals());
                 skaters
             },

@@ -9,6 +9,7 @@ use crate::protocol::{
 };
 use crate::server::ServerCore;
 use crate::transport::{self, Endpoint, kind};
+use crate::words::WordList;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -374,10 +375,27 @@ fn a_nickname_the_prompt_cannot_make_drops_the_connection() {
     let longest = "y".repeat(24);
     let mut net = Net::new();
     let fits = net.add(&longest);
-    let bad: Vec<usize> = ["x".repeat(25), String::new(), " Padded".into(), "Tab\tName".into(), "Caf\u{e9}".into()].iter().map(|name| net.add(name)).collect();
+    let bad: Vec<usize> = ["x".repeat(25), String::new(), " Padded".into(), "Tab\tName".into(), "Caf\u{e9}".into(), "Rob!".into(), "---".into()]
+        .iter()
+        .map(|name| net.add(name))
+        .collect();
     net.run(300);
     assert!(net.events(fits).iter().any(|event| matches!(event, ClientEvent::SignedIn { .. })), "24 characters sign in");
     for client in bad {
+        assert_eq!(net.events(client), vec![ClientEvent::Disconnected(Disconnect::Closed(leave::KICKED_FOR_NICKNAME))]);
+    }
+    assert_eq!(net.server.players(), 1);
+}
+
+#[test]
+fn a_nickname_holding_a_listed_word_drops_the_connection() {
+    let mut net = Net::new();
+    net.server.set_words(WordList::from_words(["faggot", "nigga"]));
+    let fine = net.add("Rob");
+    let listed: Vec<usize> = ["F4GG0T", "big n1ggggg4", "x-f a g o t-x"].iter().map(|name| net.add(name)).collect();
+    net.run(300);
+    assert!(net.events(fine).iter().any(|event| matches!(event, ClientEvent::SignedIn { .. })));
+    for client in listed {
         assert_eq!(net.events(client), vec![ClientEvent::Disconnected(Disconnect::Closed(leave::KICKED_FOR_NICKNAME))]);
     }
     assert_eq!(net.server.players(), 1);
@@ -615,6 +633,29 @@ fn a_chat_line_the_prompt_cannot_make_drops_the_connection() {
         );
         assert!(chats(&net.messages(host)).is_empty(), "{line:?}");
     }
+}
+
+#[test]
+fn a_chat_line_holding_a_listed_word_is_not_relayed() {
+    let mut net = Net::new();
+    net.server.set_words(WordList::from_words(["nigga"]));
+    let clients = lobby(&mut net, &["Host", "Guest"]);
+    let (host, guest) = (clients[0], clients[1]);
+    enter(&mut net, guest);
+    net.send(guest, &ClientMessage::Chat("lol n 1 g g g g 4".into()));
+    net.send(guest, &ClientMessage::Chat("gg".into()));
+    net.run(300);
+    assert_eq!(chats(&net.messages(host)), ["gg"]);
+    let events = net.events(guest);
+    assert!(!events.iter().any(|event| matches!(event, ClientEvent::Disconnected(_))), "the sender stays connected");
+    let lines: Vec<String> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            ClientEvent::Message(ServerMessage::Chat { text, .. }) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, ["gg"], "the sender does not see the held line either");
 }
 
 #[test]

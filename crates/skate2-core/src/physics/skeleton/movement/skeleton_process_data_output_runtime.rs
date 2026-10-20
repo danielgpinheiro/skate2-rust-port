@@ -113,7 +113,7 @@ impl SkeletonNormalAssembly {
             self.root_transforms
                 .invalidate_prediction_after_process_data_teleport(); //f300
             self.current_animation
-                .try_set_ik_enabled(true)
+                .try_enable_ik()
                 .map_err(|_| E::Missing("actual SkeletonIK"))?; //f30c
             // Two fresh retained drive-owner reads, with source field-store order.
             {

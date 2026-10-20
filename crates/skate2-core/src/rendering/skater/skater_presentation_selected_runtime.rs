@@ -688,6 +688,16 @@ impl SelectedPresentationRuntime {
         self.borrowed_hips_position
     }
 
+    /// Whether a scene character borrowed this entity at the last publication.
+    pub(crate) const fn borrowed(&self) -> bool {
+        self.borrowed_hips_position.is_some()
+    }
+
+    /// No scene character holds this entity: its callbacks are the game's again.
+    pub(crate) fn end_borrow(&mut self) {
+        self.borrowed_hips_position = None;
+    }
+
     /// A NIS's "current_player" borrows this entity
     /// (`SceneCharacterManager::ControlCharacterRenderable` `0x82870fb0`):
     /// its bone-buffer and hips callbacks answer the scene character, whose

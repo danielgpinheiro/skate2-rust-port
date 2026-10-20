@@ -30,6 +30,9 @@ release-secret.txt
 local.toml
 *.log
 
+# The dedicated server's private word list, wherever it is kept.
+badwords.txt
+
 # Local working notes, saves and game files: never published.
 /private-notes/
 /saves/

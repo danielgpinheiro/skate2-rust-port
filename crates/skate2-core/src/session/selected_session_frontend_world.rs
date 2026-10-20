@@ -264,6 +264,6 @@ impl<T, C> SelectedLiveSession<T, C> {
         if self.frontend_world.phase != Phase::Running {
             return Ok(Vec::new());
         }
-        self.inner.ai_skater_visuals(&[]).map_err(|e| error(Stage::Visual, e))
+        self.inner.ai_skater_visuals().map_err(|e| error(Stage::Visual, e))
     }
 }

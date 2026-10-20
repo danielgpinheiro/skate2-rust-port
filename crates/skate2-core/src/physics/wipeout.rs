@@ -318,9 +318,6 @@ impl WipeoutRequestLedger {
     /// increment the counter even when the same type was already requested;
     /// examples occur in `Wipeout::CheckForOffBoardWipeout` at `0x82ddec70`.
     pub fn request(&mut self, wipeout_type: WipeoutType, value: f32) {
-        if std::env::var_os("SKATE2_TRACE_HIPPY").is_some() {
-            eprintln!("hippy trace: wipeout request {wipeout_type:?} value {value}");
-        }
         let index = wipeout_type.index();
         self.requested[index] = true;
         self.values[index] = value;

@@ -322,6 +322,8 @@ pub(crate) struct MarkerUi {
     career: Option<skate2_core::CareerHud>,
     hud: PhoneListHud,
     data: PhoneListData,
+    /// The game's side of the phone's alerts, as the career last gave it.
+    alert_facts: AlertFacts,
     previous: MarkerHudSnapshot,
     /// The movies' `Audio.PlaySound` requests of the frames since `take_sounds`.
     pending_sounds: Vec<&'static str>,
@@ -602,6 +604,7 @@ impl MarkerUi {
         self.career = None;
         self.hud = Default::default();
         self.data = Default::default();
+        self.alert_facts = AlertFacts::default();
         self.previous = Default::default();
         Ok(())
     }
@@ -1004,6 +1007,7 @@ impl MarkerUi {
             career: None,
             hud: Default::default(),
             data: Default::default(),
+            alert_facts: AlertFacts::default(),
             previous: Default::default(),
             pending_sounds: Vec::new(),
             clock: Default::default(),
@@ -1208,7 +1212,11 @@ impl MarkerUi {
         self.assets.pro_film_pro_name.clone_from(&career.pro_film_pro_name);
         self.assets.frontend_arguments.clone_from(&career.frontend_arguments);
         self.can_show_phone_options=career.can_show_phone_options;
-        if self.data.service_icons!=career.phone_service_icons {self.data.service_icons=career.phone_service_icons;self.data.dirty=true;}
+        self.alert_facts=career.phone_alert_facts;
+        if career.phone_data_dirty || self.data.service_icons!=career.phone_service_icons {
+            self.data.service_icons=career.phone_service_icons;
+            self.data.dirty=true;
+        }
         let pending=self.contacts.pending();self.contacts.update(&self.assets,career.contacts.as_ref())?;
         self.screens.track(Screen::Contacts,pending,self.contacts.pending());
         for message in &career.central_messages {
@@ -2199,12 +2207,11 @@ impl MarkerUi {
         state: ScreenState,
         permissions: MarkerPermissions,
     ) -> RenderResult<()> {
+        let minimized = self.data.minimized_menu(self.alert_facts);
         let quick = self.root.named(&["mcQuickMenu"])?;
         match state {
-            ScreenState::Hidden | ScreenState::Minimized => {
-                // UpdateMinimizedMenu: all service icons/alerts absent ->hidden.
-                quick.goto(&self.assets, "hidden")?;
-            }
+            ScreenState::Hidden => quick.goto(&self.assets, "hidden")?,
+            ScreenState::Minimized => update_minimized_menu(quick, &self.assets, minimized)?,
             ScreenState::MaximizedWithOptions | ScreenState::MaximizedMarkerOnly => {
                 quick.goto(&self.assets, "maximized")?;
                 quick.named(&["mQuickOpen"])?.goto(
@@ -2244,6 +2251,32 @@ impl MarkerUi {
         }
         Ok(())
     }
+}
+
+/// `hudphonelist.UpdateMinimizedMenu`: the quick menu plays `minimized` under
+/// ID_PHONELIST_USE_PHONE, its alert line shown only for an alert, and each icon slot plays its
+/// label; with nothing to show it plays `hidden`.
+fn update_minimized_menu(quick: &mut Clip, assets: &Assets, menu: MinimizedMenu) -> RenderResult<()> {
+    let (icons, alert) = match menu {
+        MinimizedMenu::Hidden => return quick.goto(assets, "hidden"),
+        MinimizedMenu::Services(icons) => (icons, None),
+        MinimizedMenu::Alert(text) => (["off"; 2], Some(text)),
+    };
+    quick.goto(assets, "minimized")?;
+    for name in ["labelText", "labelText_glow"] {
+        quick.named(&["mcTextHeader", name])?.text = Some(assets.strings["ID_PHONELIST_USE_PHONE"].clone());
+    }
+    let line = quick.named(&["mAlert"])?;
+    line.visible = alert.is_some();
+    if let Some(text) = alert {
+        for name in ["labelText", "labelTextGlow"] {
+            line.named(&["mTextAlert", name])?.text = Some(assets.strings[text].clone());
+        }
+    }
+    for (slot, label) in icons.into_iter().enumerate() {
+        quick.named(&[&format!("mIconServices{slot}")])?.goto(assets, label)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

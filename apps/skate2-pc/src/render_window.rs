@@ -181,6 +181,13 @@ pub fn run_with_options(
                 .unwrap_or("Skate 2 — original geometry / diagnostic camera and shading"),
         )
         .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+    // The executable's icon (build.rs), in the title bar and on the taskbar.
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::{IconExtWindows, WindowBuilderExtWindows};
+        let icon = || winit::window::Icon::from_resource(1, None).ok();
+        builder = builder.with_window_icon(icon()).with_taskbar_icon(icon());
+    }
     // SKATE2_DIAGNOSTIC_WINDOW_SIZE=WxH: a scripted run's logical window size.
     if let Some((width, height)) = std::env::var("SKATE2_DIAGNOSTIC_WINDOW_SIZE")
         .ok()

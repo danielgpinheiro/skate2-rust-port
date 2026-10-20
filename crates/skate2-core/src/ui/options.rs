@@ -4,8 +4,9 @@
 //! variant `OnMenuSelect` (0x826871a0) picks for the front end, a free skate game or any other
 //! game. In game the list leads with the Music Player (FE state 30). PC port addition: a
 //! Display Settings page after Video Settings holds the PC rows (PostFX, Fisheye, Frame Rate
-//! Cap, Frame Rate Counter, Fullscreen), saved in their own chunk. Beside it the PC port calls
-//! Video Settings (`ID_GAMESETTINGS_VIDEO_SETTINGS`) Gameplay Settings, for its camera, HUD and
+//! Cap, Frame Rate Counter, Fullscreen), saved in their own chunk, and an Online Settings page
+//! holds Show Lobby Chat, saved in `online-config.json`. Beside them the PC port calls Video
+//! Settings (`ID_GAMESETTINGS_VIDEO_SETTINGS`) Gameplay Settings, for its camera, HUD and
 //! subtitle rows.
 use super::pause_menu::PauseMenuInput;
 pub use skate2_formats::skater_profile::{FrameRateCap, PcDisplaySettings, ProfileSettings};
@@ -19,6 +20,8 @@ pub enum Page {
     Video,
     /// PC port addition.
     Display,
+    /// PC port addition.
+    Online,
 }
 
 /// The Video Settings screen `OnMenuSelect` (`0x826871a0`) opens: `VideoSettingsMainMenu` in
@@ -39,6 +42,8 @@ pub enum Row {
     VideoSettings,
     /// PC port addition: the Display Settings page.
     DisplaySettings,
+    /// PC port addition: the Online Settings page.
+    OnlineSettings,
     SfxVolume,
     DialogueVolume,
     MusicVolume,
@@ -58,16 +63,21 @@ pub enum Row {
     MiniMap,
     /// `eSk8FEGameOption_HUDToggle`: `mHUD`.
     Hud,
+    /// PC port addition: `online-config.json`'s `show_lobby_chat`.
+    ShowLobbyChat,
 }
 impl Row {
     /// `gGameOptionsItems` 0x82fdf9a8's type: `option`, `slider` or `selector`.
     #[must_use]
     pub const fn kind(self) -> &'static str {
         match self {
-            Self::MusicPlayer | Self::AudioSettings | Self::VideoSettings | Self::DisplaySettings => "option",
+            Self::MusicPlayer | Self::AudioSettings | Self::VideoSettings | Self::DisplaySettings | Self::OnlineSettings => {
+                "option"
+            }
             Self::SfxVolume | Self::DialogueVolume | Self::MusicVolume => "slider",
             Self::PostFx | Self::Fisheye | Self::FrameRateCap | Self::FpsCounter | Self::Fullscreen
-            | Self::Subtitles | Self::CameraAngle | Self::GrindTransparency | Self::MiniMap | Self::Hud => "selector",
+            | Self::Subtitles | Self::CameraAngle | Self::GrindTransparency | Self::MiniMap | Self::Hud
+            | Self::ShowLobbyChat => "selector",
         }
     }
     /// `gGameOptionsItems`' title id; the PC rows carry literal text.
@@ -78,6 +88,7 @@ impl Row {
             Self::AudioSettings => "ID_GAMESETTINGS_AUDIO_SETTINGS",
             Self::VideoSettings => "Gameplay Settings",
             Self::DisplaySettings => "Display Settings",
+            Self::OnlineSettings => "Online Settings",
             Self::SfxVolume => "ID_GAMESETTINGS_SFXVOLUME",
             Self::DialogueVolume => "ID_GAMESETTINGS_DIALOGVOLUME",
             Self::MusicVolume => "ID_GAMESETTINGS_MUSICVOLUME",
@@ -91,11 +102,13 @@ impl Row {
             Self::GrindTransparency => "ID_GAMESETTINGS_TRANSPARENCY_TOGGLE",
             Self::MiniMap => "ID_GAMESETTINGS_MINIMAP_TOGGLE",
             Self::Hud => "ID_GAMESETTINGS_HUD_TOGGLE",
+            Self::ShowLobbyChat => "Show Lobby Chat",
         }
     }
 }
-const FRONT_END: &[Row] = &[Row::AudioSettings, Row::VideoSettings, Row::DisplaySettings];
-const IN_GAME: &[Row] = &[Row::MusicPlayer, Row::AudioSettings, Row::VideoSettings, Row::DisplaySettings];
+const FRONT_END: &[Row] = &[Row::AudioSettings, Row::VideoSettings, Row::DisplaySettings, Row::OnlineSettings];
+const IN_GAME: &[Row] =
+    &[Row::MusicPlayer, Row::AudioSettings, Row::VideoSettings, Row::DisplaySettings, Row::OnlineSettings];
 const AUDIO: &[Row] = &[Row::SfxVolume, Row::DialogueVolume, Row::MusicVolume];
 /// `gGameOptionsScreens` rows 7, 3 and 5 without `eSk8FEGameOption_VideoCalibration`, whose
 /// FE state 0 calibration screen is not ported.
@@ -103,6 +116,7 @@ const VIDEO_MAIN_MENU: &[Row] = &[Row::Subtitles];
 const VIDEO_GAME: &[Row] = &[Row::CameraAngle, Row::GrindTransparency, Row::Subtitles];
 const VIDEO_FREESKATE: &[Row] = &[Row::CameraAngle, Row::GrindTransparency, Row::Subtitles, Row::MiniMap, Row::Hud];
 const DISPLAY: &[Row] = &[Row::PostFx, Row::Fisheye, Row::FrameRateCap, Row::FpsCounter, Row::Fullscreen];
+const ONLINE: &[Row] = &[Row::ShowLobbyChat];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
@@ -121,6 +135,8 @@ pub struct Snapshot {
     pub grind_transparency: bool,
     pub mini_map: bool,
     pub hud: bool,
+    /// Show Lobby Chat (PC port addition).
+    pub show_lobby_chat: bool,
     /// The Video Settings screen this opening picks.
     pub video: VideoScreen,
     /// `FrontEndState_MusicPlayer` (FE state 30) is pushed over Options: `OnMenuSelect`'s
@@ -141,6 +157,7 @@ impl Snapshot {
                 VideoScreen::FreeSkate => VIDEO_FREESKATE,
             },
             Page::Display => DISPLAY,
+            Page::Online => ONLINE,
         }
     }
     /// `gGameOptionsScreenTitle` 0x82fdf97c.
@@ -150,6 +167,7 @@ impl Snapshot {
             Page::Audio => "ID_GAMESETTINGS_AUDIO_SETTINGS",
             Page::Video => "Gameplay Settings",
             Page::Display => "Display Settings",
+            Page::Online => "Online Settings",
             Page::Hidden | Page::Options => "ID_GAMESETTINGS_TITLE",
         }
     }
@@ -169,6 +187,8 @@ pub enum Action {
 pub struct Controller {
     state: Snapshot,
     saved: PcDisplaySettings,
+    /// Show Lobby Chat as `online-config.json` last held it.
+    saved_lobby_chat: bool,
     /// `mIsDirty`: a profile setting changed since `OnEnter`.
     dirty: bool,
     /// `FE_SOUND_*` globals this input played (options.apt and `FrontEndState_Options`).
@@ -192,6 +212,21 @@ impl Controller {
     pub fn load(&mut self, values: PcDisplaySettings) {
         self.state.values = values;
         self.saved = values;
+    }
+    /// `online-config.json`'s Show Lobby Chat.
+    pub fn load_lobby_chat(&mut self, show: bool) {
+        self.state.show_lobby_chat = show;
+        self.saved_lobby_chat = show;
+    }
+    /// Show Lobby Chat as the row has it, which the game follows at once.
+    #[must_use]
+    pub const fn show_lobby_chat(&self) -> bool {
+        self.state.show_lobby_chat
+    }
+    /// Whether exiting saves Show Lobby Chat to `online-config.json`.
+    #[must_use]
+    pub const fn lobby_chat_dirty(&self) -> bool {
+        self.state.show_lobby_chat != self.saved_lobby_chat
     }
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
@@ -236,6 +271,7 @@ impl Controller {
     }
     pub fn close_after_save(&mut self) {
         self.saved = self.state.values;
+        self.saved_lobby_chat = self.state.show_lobby_chat;
         self.dirty = false;
         self.state.page = Page::Hidden;
         self.state.music_player = false;
@@ -297,6 +333,7 @@ impl Controller {
                 Row::MusicPlayer => return Action::MusicPlayer,
                 Row::AudioSettings => self.state.page = Page::Audio,
                 Row::DisplaySettings => self.state.page = Page::Display,
+                Row::OnlineSettings => self.state.page = Page::Online,
                 _ => self.state.page = Page::Video,
             }
             self.state.selected = 0;
@@ -319,10 +356,14 @@ impl Controller {
                 self.sounds.push(if input.right { "FE_SOUND_CORE_MUSIC_VOLUME_RIGHT" } else { "FE_SOUND_CORE_MUSIC_VOLUME_LEFT" });
                 &mut settings.music_volume
             }
-            Row::PostFx | Row::Fisheye | Row::FrameRateCap | Row::FpsCounter | Row::Fullscreen => {
+            Row::PostFx | Row::Fisheye | Row::FrameRateCap | Row::FpsCounter | Row::Fullscreen | Row::ShowLobbyChat => {
                 // The PC selectors sound core_nav_left/core_nav_right by key and, as
                 // Prev/NextValueCalc do, wrap past either end.
                 self.sounds.push(if input.right { "FE_SOUND_CORE_NAV_RIGHT" } else { "FE_SOUND_CORE_NAV_LEFT" });
+                if row == Row::ShowLobbyChat {
+                    self.state.show_lobby_chat = !self.state.show_lobby_chat;
+                    return Action::None;
+                }
                 let values = &mut self.state.values;
                 match row {
                     Row::PostFx => values.postfx = !values.postfx,
@@ -484,6 +525,37 @@ mod tests {
         settings.subtitles = true;
         menu.open(true, VideoScreen::Game, &settings);
         assert!(menu.snapshot().subtitles && !menu.dirty());
+    }
+    #[test]
+    fn show_lobby_chat_toggles_on_the_online_page_and_saves_only_when_changed() {
+        let mut settings = ProfileSettings::default();
+        let mut menu = Controller::default();
+        menu.load_lobby_chat(true);
+        menu.open(true, VideoScreen::Game, &settings);
+        menu.acknowledge_intro();
+        assert_eq!(menu.snapshot().rows(), IN_GAME);
+        for _ in 0..4 {
+            menu.update(press(|i| i.down = true), &mut settings);
+        }
+        assert_eq!(menu.update(press(|i| i.select = true), &mut settings), Action::None);
+        assert_eq!(menu.snapshot().page, Page::Online);
+        assert_eq!(menu.snapshot().title(), "Online Settings");
+        assert_eq!(menu.snapshot().rows(), ONLINE);
+        menu.take_sounds();
+        menu.update(press(|i| i.right = true), &mut settings);
+        assert!(!menu.show_lobby_chat() && menu.lobby_chat_dirty());
+        // Not a profile setting: the profile is not dirtied.
+        assert!(!menu.dirty() && !menu.display_dirty());
+        menu.update(press(|i| i.left = true), &mut settings);
+        assert!(menu.show_lobby_chat() && !menu.lobby_chat_dirty());
+        assert_eq!(menu.take_sounds(), ["FE_SOUND_CORE_NAV_RIGHT", "FE_SOUND_CORE_NAV_LEFT"]);
+        menu.update(press(|i| i.left = true), &mut settings);
+        menu.close_after_save();
+        assert!(!menu.show_lobby_chat() && !menu.lobby_chat_dirty());
+        // The front end's list ends with it as well.
+        menu.open(false, VideoScreen::MainMenu, &settings);
+        assert_eq!(menu.snapshot().rows().last(), Some(&Row::OnlineSettings));
+        assert!(!menu.snapshot().show_lobby_chat);
     }
     #[test]
     fn video_settings_rows_follow_the_game_mode() {

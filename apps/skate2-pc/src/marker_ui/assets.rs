@@ -819,6 +819,9 @@ impl Assets {
             "ID_PHONELIST_GOTO_MARKER",
             "ID_PHONELIST_PLACE_MARKER",
             "ID_PHONELIST_OPTIONS_TITLE",
+            "ID_PHONELIST_USE_PHONE",
+            "ID_PHONELIST_ANYWHERE_ALERT",
+            "ID_PHONELIST_SPONSORSHIP_ALERT",
         ] {
             let packed = categories
                 .iter()

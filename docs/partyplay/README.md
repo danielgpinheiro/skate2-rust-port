@@ -278,8 +278,20 @@ skeleton, hook and board, and its entry in the World's physical collection, `Sim
 0x828a63e0). `UnloadPartyMember` 0x828182f0 then unloads each member's character
 (`selected_session_party_skaters.rs` `try_destroy_party_skaters`). The next Party Play game spawns
 its later skaters afresh. The first player's skater stays, as it does in every port mode, without
-the pin another player's turn gave it (a fresh native Actor has none); the player rows are not
-reset.
+the pin another player's turn gave it (a fresh native Actor has none).
+
+The unload resets the player rows before its `ResetGame`, as `UnloadGameState` does:
+`AISkaterManager::UnregisterAllSkaters` 0x824cb868 (each AI row's recipe unregistered, then the
+row removed), `PlayersBackEnd::ResetPlayers` 0x82564338, then `CreatePlayer(0, PT_Human, -1)`
+0x82563d50 on the controller player 0 had. `UpdatePlayerName` 0x82563a88 names that player by the
+game mode still in force: Party Play's "Player 1". The single player game started next
+(`StateMainGameFlow::DoStartSinglePlayerGame` 0x8277b070, outside Party Play: the career, a free
+skate, an online game) resets the rows again, creates player 0 under the profile's name, applies
+the loaded skater's attributes (`PlayerLoaderImpl::ApplyPlayerAttributes` 0x828158f0) and gives it
+the front end's controller (`selected_session_freeskate.rs` `unload_players`,
+`start_single_player_players`). Before this, the career after a Party Play game kept "Player 1" as
+the player's name. `cMsgSetPlayer` reaches only a `PartyPlayUI`, the UI `ResetGame` makes in
+`GM_PartyPlay` (its constructor 0x828aeae0 subscribes to it; `PlayerUI` does not).
 
 A switched challenge has no tips loading screen, on purpose: the port's loads finish behind the
 fade. Natively `PartyPlayLoadState` waits for the assets and for `IsLoadingScreenReady`

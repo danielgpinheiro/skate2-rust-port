@@ -369,20 +369,25 @@ impl SkeletonIkState {
     pub(crate) const fn do_ik(&self) -> bool {
         self.do_ik
     }
-    /// `Skeleton::EnableIK/DisableIK` changes only this retained flag.
-    /// `Skeleton::Init82b62ae0..62b04`: clear blends and modes only.
+    /// `Skeleton::Init82b62ae0..62b04`: DisableIK's stores, then EnableIK's.
     pub(crate) fn finish_skeleton_init(&mut self) {
+        self.disable();
+        self.enable();
+    }
+
+    /// `Skeleton::EnableIK` 0x82b462e0 stores only this flag.
+    pub(crate) fn enable(&mut self) {
+        self.do_ik = true;
+    }
+    /// `Skeleton::DisableIK` 0x82b462f0 clears each entry's on-deck blend, mode
+    /// and external blend before the flag, so no part keeps its IK.
+    pub(crate) fn disable(&mut self) {
         for entry in 0..4 {
             self.on_deck_blends[entry] = 0.0;
             self.modes[entry] = 0;
             self.external_blends[entry] = 0.0;
         }
         self.do_ik = false;
-        self.do_ik = true;
-    }
-
-    pub(crate) fn set_enabled(&mut self, enabled: bool) {
-        self.do_ik = enabled;
     }
     /// Skeleton.ResetPushAbort82b3bb80 clears only the retained IK push veto.
     pub(crate) fn reset_push_abort(&mut self) {
@@ -543,12 +548,8 @@ impl SkeletonIkState {
         self.on_deck_blends[1] = 1.0;
         self.on_deck_blends[0] = 1.0;
     }
+    /// `UpdateWipeoutAdjust` 0x82b59db8..0x82b59ddc ends with DisableIK's stores.
     pub(crate) fn finish_wipeout_adjust(&mut self) {
-        for entry in 0..4 {
-            self.on_deck_blends[entry] = 0.0;
-            self.modes[entry] = 0;
-            self.external_blends[entry] = 0.0;
-        }
-        self.do_ik = false;
+        self.disable();
     }
 }

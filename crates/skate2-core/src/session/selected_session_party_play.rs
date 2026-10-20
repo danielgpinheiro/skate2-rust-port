@@ -93,6 +93,13 @@ impl<T, C> SelectedLiveSession<T, C> {
         Ok(())
     }
 
+    /// `UpdatePlayerName` 0x82563a88's `GM_PartyPlay` name for a player:
+    /// `FormatString(ID_PARTY_PLAYER_PLAYER, index + 1)`.
+    pub(super) fn party_player_name(&self, index: u32) -> Result<String, SelectedLiveError> {
+        let mounts = Arc::clone(&self.inner.assets.as_ref().ok_or_else(|| error("party play assets absent"))?.mounts);
+        Ok(format_number(&super::career::localized(&mounts, "ID_PARTY_PLAYER_PLAYER")?, index + 1))
+    }
+
     /// `PartyPlayLoadingState` 0x8276e6c8 once the location is loaded: each later player's
     /// `cMsgSpawnPlayer` at `GetSpawnLocation(location, i)` 0x82a8d250 (the location's rows with
     /// its translation moved by (0, 0, -5i): the text location table carries no sub-locations),

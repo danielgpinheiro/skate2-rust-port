@@ -1,6 +1,7 @@
 //! PC port addition: `online-config.json` in the game's root directory (next
-//! to `saves`), holding the nickname the player uses in online lobbies and the
-//! dedicated server the game connects to (`skate2-pc --server` on that host).
+//! to `saves`), holding the nickname the player uses in online lobbies, the
+//! dedicated server the game connects to (`skate2-pc --server` on that host) and
+//! whether lobby chat shows (Settings' Online Settings).
 //!
 //! The server the game connects to by default is part of the build: compiled with
 //! `SKATE2_DEFAULT_SERVER=<host:port>` (a release's public server), else this machine's. The
@@ -18,12 +19,21 @@ pub const DEFAULT_SERVER: &str = match option_env!("SKATE2_DEFAULT_SERVER") {
     _ => "127.0.0.1:32082",
 };
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OnlineConfig {
     pub nickname: String,
     /// The file's dedicated server, `host:port` (or `host`, at the server's default port); empty
     /// for [`DEFAULT_SERVER`]. Not asked for in game.
     pub server: String,
+    /// Show Lobby Chat: off, T opens no chat prompt and members' chat lines stay out of the
+    /// event log. On unless the file says otherwise.
+    pub show_lobby_chat: bool,
+}
+
+impl Default for OnlineConfig {
+    fn default() -> Self {
+        Self { nickname: String::new(), server: String::new(), show_lobby_chat: true }
+    }
 }
 
 impl OnlineConfig {
@@ -70,7 +80,12 @@ impl OnlineConfig {
     }
 
     fn text(&self) -> String {
-        format!("{{\n  \"nickname\": {},\n  \"server\": {}\n}}\n", quote(&self.nickname), quote(&self.server))
+        format!(
+            "{{\n  \"nickname\": {},\n  \"server\": {},\n  \"show_lobby_chat\": {}\n}}\n",
+            quote(&self.nickname),
+            quote(&self.server),
+            self.show_lobby_chat
+        )
     }
 }
 
@@ -92,8 +107,8 @@ pub(super) fn quote(text: &str) -> String {
     out
 }
 
-/// Reads the top-level object's `nickname` and `server` strings and skips every
-/// other value.
+/// Reads the top-level object's `nickname` and `server` strings and its `show_lobby_chat`
+/// boolean, and skips every other value.
 fn parse(text: &str) -> Option<OnlineConfig> {
     let mut reader = Reader { bytes: text.as_bytes(), at: 0 };
     let mut config = OnlineConfig::default();
@@ -108,6 +123,8 @@ fn parse(text: &str) -> Option<OnlineConfig> {
             config.nickname = reader.string()?;
         } else if key == "server" && reader.peek()? == b'"' {
             config.server = reader.string()?.trim().to_owned();
+        } else if key == "show_lobby_chat" && matches!(reader.peek()?, b't' | b'f') {
+            config.show_lobby_chat = reader.boolean()?;
         } else {
             reader.skip_value()?;
         }
@@ -163,6 +180,16 @@ impl Reader<'_> {
     }
     fn expect(&mut self, byte: u8) -> Option<()> {
         (self.next()? == byte).then_some(())
+    }
+    fn boolean(&mut self) -> Option<bool> {
+        self.peek()?;
+        for (word, value) in [(&b"true"[..], true), (&b"false"[..], false)] {
+            if self.bytes[self.at..].starts_with(word) {
+                self.at += word.len();
+                return Some(value);
+            }
+        }
+        None
     }
     fn string(&mut self) -> Option<String> {
         self.expect(b'"')?;
@@ -266,8 +293,19 @@ mod tests {
 
     #[test]
     fn config_round_trips_through_its_own_writer() {
-        let config = OnlineConfig { nickname: "Sk8 \"Q\" \\ é".into(), server: "203.0.113.7:32082".into() };
-        assert_eq!(parse(&config.text()), Some(config));
+        for show_lobby_chat in [true, false] {
+            let config =
+                OnlineConfig { nickname: "Sk8 \"Q\" \\ é".into(), server: "203.0.113.7:32082".into(), show_lobby_chat };
+            assert_eq!(parse(&config.text()), Some(config));
+        }
+    }
+
+    #[test]
+    fn lobby_chat_shows_unless_the_file_turns_it_off() {
+        assert!(parse(r#"{"nickname": "Rob", "server": ""}"#).unwrap().show_lobby_chat);
+        assert!(!parse(r#"{"show_lobby_chat": false, "nickname": "Rob"}"#).unwrap().show_lobby_chat);
+        assert!(parse(r#"{"show_lobby_chat": "no"}"#).unwrap().show_lobby_chat);
+        assert_eq!(parse(r#"{"show_lobby_chat": tru}"#), None);
     }
 
     #[test]

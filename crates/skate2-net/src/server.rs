@@ -12,6 +12,7 @@ use crate::protocol::{
     ServerMessage, challenge, leave, play_now, refuse, request, reset, timer, valid_chat, valid_nickname,
 };
 use crate::transport::{self, Endpoint, PROTOCOL_VERSION, kind, read_header};
+use crate::words::WordList;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::Write as _;
 use std::net::{SocketAddr, UdpSocket};
@@ -297,6 +298,8 @@ pub struct ServerCore {
     random: Random,
     outgoing: Vec<(SocketAddr, Vec<u8>)>,
     log: Log,
+    /// The words no nickname may hold and no relayed chat line holds (`badwords.txt`).
+    words: WordList,
 }
 
 impl ServerCore {
@@ -313,7 +316,13 @@ impl ServerCore {
             random: Random(seed | 1),
             outgoing: Vec::new(),
             log,
+            words: WordList::default(),
         }
+    }
+
+    /// The word list nicknames and chat lines are checked against.
+    pub fn set_words(&mut self, words: WordList) {
+        self.words = words;
     }
 
     /// Connections signed in.
@@ -565,6 +574,11 @@ impl ServerCore {
         // The game signs in only with what its nickname prompt makes.
         if !valid_nickname(nickname) {
             (self.log)(&format!("connection {id} signed in with a nickname the game cannot make ({} bytes): dropped", nickname.len()));
+            self.drop_connection(id, leave::KICKED_FOR_NICKNAME, now);
+            return;
+        }
+        if self.words.holds_word(nickname) {
+            (self.log)(&format!("connection {id} signed in as {nickname}, which holds a listed word: dropped"));
             self.drop_connection(id, leave::KICKED_FOR_NICKNAME, now);
             return;
         }
@@ -893,8 +907,8 @@ impl ServerCore {
 
     /// A member's chat line, to every member of its game (the sender too). The game is the one
     /// the server put the member in, so no line reaches another game; a line the game's prompt
-    /// cannot make drops the connection; one sent before `ChatEnabled` or past the flood limit is
-    /// dropped.
+    /// cannot make drops the connection; one sent before `ChatEnabled`, past the flood limit or
+    /// holding a word of the server's list is dropped.
     fn chat(&mut self, game_id: u32, user_id: u64, text: String, now: Instant) {
         let Some(member) = self.games.get_mut(&game_id).and_then(|game| game.member_mut(user_id)) else { return };
         if !valid_chat(&text) {
@@ -914,6 +928,10 @@ impl ServerCore {
         }
         member.chat_sent.push_back(now);
         let name = member.name.clone();
+        if self.words.holds_word(&text) {
+            (self.log)(&format!("chat in game {game_id} from {name} held back: it holds a listed word"));
+            return;
+        }
         (self.log)(&format!("chat in game {game_id} from {name}: {text}"));
         self.broadcast(game_id, &ServerMessage::Chat { user_id, text }, None);
     }
@@ -1333,6 +1351,14 @@ pub fn run(config: &ServerConfig) -> std::io::Result<()> {
     let log = console.clone();
     let mut core = ServerCore::new(seed, config.build, Box::new(move |line| log.line(line)));
     console.line(&format!("skate2-pc dedicated server listening on {} (build {})", socket.local_addr()?, config.build.id()));
+    let words = WordList::beside_server();
+    let path = words.path().map(|path| path.display().to_string()).unwrap_or_default();
+    console.line(&if words.is_empty() {
+        format!("word list {path}: no words, so nicknames and chat are not filtered until it has some")
+    } else {
+        format!("word list {path}: {} words", words.len())
+    });
+    core.set_words(words);
     let mut buffer = [0_u8; 2048];
     let mut last_status = Instant::now();
     let mut traffic = Traffic::default();
