@@ -285,6 +285,10 @@ fn main() -> ExitCode {
                 }
                 ExitCode::FAILURE
             };
+            // macOS: winit takes NSApplication as its principal class, which the folder dialog
+            // below would take first, so the event loop is made before that dialog.
+            #[cfg(target_os = "macos")]
+            render_window::prepare_event_loop();
             return match game_root::resolve() {
                 Ok(Some(root)) => match game_update::play(&root) {
                     Ok(()) => ExitCode::SUCCESS,
