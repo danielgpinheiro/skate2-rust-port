@@ -108,7 +108,7 @@ game.
 **Hosting:** `skate2-pc --server <ip:port>` runs the game in dedicated server mode, on Windows or
 Linux. The Linux zip also holds `skate2-server`, the server alone, for a VPS or any machine
 without a display. Players join only a server of the same release; `--update` on either program
-puts the newest release in place. A server can also run a moderation panel, with chat shadowbans
+puts the newest release in place. A server can also run a barebones moderation panel, with chat shadowbans
 and IP bans: see [the server's documentation](docs/online/implementation.md#the-server).
 
 ### Updates

@@ -1421,8 +1421,9 @@ impl ServerCore {
                     let written = self.chat_shadowbans.insert(address, &name);
                     outcome.push(self.moderated(
                         written,
-                        format!("{name} ({address}) is chat-shadowbanned"),
-                        format!("{name} ({address}) was chat-shadowbanned already."),
+                        address,
+                        format!("{name} is chat-shadowbanned"),
+                        format!("{name} was chat-shadowbanned already."),
                         moderation::CHAT_SHADOWBANS_FILE,
                     ));
                 }
@@ -1432,8 +1433,9 @@ impl ServerCore {
                     let written = self.ip_bans.insert(address, &name);
                     outcome.push(self.moderated(
                         written,
-                        format!("{name} ({address}) is IP-banned"),
-                        format!("{name} ({address}) was IP-banned already."),
+                        address,
+                        format!("{name} is IP-banned"),
+                        format!("{name} was IP-banned already."),
                         moderation::IP_BANS_FILE,
                     ));
                 }
@@ -1448,19 +1450,20 @@ impl ServerCore {
                     outcome.push(match self.chat_shadowbans.remove(address) {
                         Some((name, written)) => self.moderated(
                             Some(written),
-                            format!("The chat shadowban on {name} ({address}) is lifted"),
+                            address,
+                            format!("The chat shadowban on {name} is lifted"),
                             String::new(),
                             moderation::CHAT_SHADOWBANS_FILE,
                         ),
-                        None => format!("{address} was not chat-shadowbanned."),
+                        None => "A ticked chat shadowban was not in force.".to_owned(),
                     });
                 }
                 for address in ip {
                     outcome.push(match self.ip_bans.remove(address) {
                         Some((name, written)) => {
-                            self.moderated(Some(written), format!("The IP ban on {name} ({address}) is lifted"), String::new(), moderation::IP_BANS_FILE)
+                            self.moderated(Some(written), address, format!("The IP ban on {name} is lifted"), String::new(), moderation::IP_BANS_FILE)
                         }
-                        None => format!("{address} was not IP-banned."),
+                        None => "A ticked IP ban was not in force.".to_owned(),
                     });
                 }
             }
@@ -1468,18 +1471,18 @@ impl ServerCore {
         outcome.join(" ")
     }
 
-    /// A ban's or lift's outcome for the page, logged when it changed a list: `unchanged` when
-    /// there was nothing to change; when its file could not be written, the change holds until the
-    /// server stops.
-    fn moderated(&mut self, written: Option<std::io::Result<()>>, change: String, unchanged: String, file: &str) -> String {
+    /// A ban's or lift's outcome for the page, which shows no address, logged with the address
+    /// when it changed a list: `unchanged` when there was nothing to change; when its file could
+    /// not be written, the change holds until the server stops.
+    fn moderated(&mut self, written: Option<std::io::Result<()>>, address: IpAddr, change: String, unchanged: String, file: &str) -> String {
         match written {
             None => unchanged,
             Some(Ok(())) => {
-                (self.log)(&format!("moderation panel: {change}"));
+                (self.log)(&format!("moderation panel: {change} ({address})"));
                 format!("{change}.")
             }
             Some(Err(error)) => {
-                (self.log)(&format!("moderation panel: {change} until the server stops: {file} could not be written ({error})"));
+                (self.log)(&format!("moderation panel: {change} ({address}) until the server stops: {file} could not be written ({error})"));
                 format!("{change} until the server stops: {file} could not be written ({error}).")
             }
         }
@@ -1677,7 +1680,7 @@ fn start_panel(bind: SocketAddr, folder: &Path, console: &Console) -> Option<std
             Some(receiver)
         }
         Err(error) => {
-            console.line(&format!("moderation panel: off, as port {port} could not be opened ({error})"));
+            console.line(&format!("moderation panel: off, as it could not start on port {port} ({error})"));
             None
         }
     }

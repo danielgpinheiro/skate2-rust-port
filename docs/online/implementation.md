@@ -116,9 +116,13 @@ game's state:
   `"moderation_panel_port": <port>` in `server-config.json` and a key in `moderation-key.txt`
   (16 to 256 letters, digits, `-`, `_`, `.` or `~`, on one line), the server serves
   `http://<server>:<port>/moderationpanel?key=<key>` at its own address. The page lists the
-  signed-in players (name, IP address, game, time online, version, chat shadowban), each with a
-  box to tick, with Chat Shadowban and IP Ban beside them, and under them the bans in force, with
-  Lift Ban; an action adds to or removes from the lists above and shows its outcome once.
+  signed-in players (name, game, time online, version, chat shadowban), each with a box to tick,
+  with Chat Shadowban and IP Ban beside them, and under them the bans in force, with Lift Ban; an
+  action adds to or removes from the lists above and shows its outcome once. The page shows no
+  IP address, not even in its source: a box sends a reference drawn from the address with a
+  secret the panel makes at each start, which the panel maps back for an hour after the page last
+  listed it (a form from an older page is asked to be refreshed). The ban lists' files and the
+  server's console still name the addresses.
   Without the key, every request is answered as one for a page that does not exist; an address
   that sends 10 wrong keys within 15 minutes is answered so for the rest of those 15 minutes,
   whatever key it sends. The key is compared by its SHA-256 hash, in time that does not depend on

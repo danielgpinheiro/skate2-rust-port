@@ -1379,8 +1379,8 @@ fn an_ip_ban_closes_the_address_s_connections_without_a_word_and_a_lift_lets_it_
         answer.recv().expect("an outcome")
     };
     let outcome = ask(&mut net, Action::IpBan(vec![(troll_address, "Troll".into())]));
-    assert_eq!(outcome, "Troll (10.0.0.2) is IP-banned. 1 connection closed.");
-    assert_eq!(ask(&mut net, Action::IpBan(vec![(troll_address, "Troll".into())])), "Troll (10.0.0.2) was IP-banned already.");
+    assert_eq!(outcome, "Troll is IP-banned. 1 connection closed.", "the page shows no address");
+    assert_eq!(ask(&mut net, Action::IpBan(vec![(troll_address, "Troll".into())])), "Troll was IP-banned already.");
     let before = net.received_bytes.get(&net.clients[troll].0).copied();
     net.run(1_000);
     assert!(net.messages(host).iter().any(|message| matches!(message, ServerMessage::PlayerLeave { reason: leave::LOST_CONNECTION, .. })));
@@ -1391,7 +1391,7 @@ fn an_ip_ban_closes_the_address_s_connections_without_a_word_and_a_lift_lets_it_
     let view = answer.recv().expect("a view");
     assert_eq!(view.players.iter().map(|player| player.name.as_str()).collect::<Vec<_>>(), ["Host"]);
     assert_eq!(view.ip_bans, [(troll_address, "Troll".to_owned())]);
-    assert_eq!(ask(&mut net, Action::Lift { chat: vec![troll_address], ip: vec![troll_address] }), "10.0.0.2 was not chat-shadowbanned. The IP ban on Troll (10.0.0.2) is lifted.");
+    assert_eq!(ask(&mut net, Action::Lift { chat: vec![troll_address], ip: vec![troll_address] }), "A ticked chat shadowban was not in force. The IP ban on Troll is lifted.");
     let back = net.add_at("Back", Build::DEVELOPMENT, SocketAddr::from(([10, 0, 0, 2], 4001)));
     net.run(500);
     assert!(signed_in(&net.events(back)).is_some(), "the address connects again");

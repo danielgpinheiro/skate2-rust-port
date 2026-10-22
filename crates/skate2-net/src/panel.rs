@@ -3,12 +3,14 @@
 //! chat-shadowban or IP-ban, and the bans in force, to lift. A request without the key in
 //! `moderation-key.txt` is answered as one for a page that does not exist, and an address that
 //! sent [`MAX_FAILURES`] wrong keys is answered so for the rest of [`FAILURE_WINDOW`], whatever
-//! key it sends. The page runs no script, loads nothing else and is never cached.
+//! key it sends. The page runs no script, loads nothing else and is never cached, and it shows no
+//! player's address: its boxes send references that the panel keeps for the addresses it listed.
 //!
 //! The panel serves on threads of its own and asks the server's loop for what it shows and does
 //! ([`Request`]), so the loop never waits on a browser.
 
 use crate::moderation::{self, PanelKey};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{self, Read, Write as _};
@@ -40,6 +42,9 @@ const ANSWER_TIME: Duration = Duration::from_secs(2);
 const NOTICE_TIME: Duration = Duration::from_secs(60);
 /// The most players or bans one action takes.
 const MAX_TARGETS: usize = 512;
+/// How long the page's references to the addresses it listed are kept since they were last
+/// listed.
+const SHOWN_TIME: Duration = Duration::from_secs(60 * 60);
 
 /// What the panel asks of the server's loop.
 #[derive(Debug)]
@@ -103,6 +108,12 @@ struct Panel {
     failures: Mutex<HashMap<IpAddr, (u32, Instant)>>,
     /// The last action's outcome, shown on the next page.
     notice: Mutex<Option<(Instant, String)>>,
+    /// What the page's references are drawn from, new at each start, so that a reference tells
+    /// nothing of its address.
+    salt: [u8; 32],
+    /// The addresses the page listed, under the references its boxes send in their place, and
+    /// when each was last listed.
+    shown: Mutex<HashMap<String, (IpAddr, Instant)>>,
     log: Log,
 }
 
@@ -110,11 +121,13 @@ struct Panel {
 /// its requests from `requests`. The address it listens at.
 ///
 /// # Errors
-/// The port could not be opened.
+/// The system's random source failed, or the port could not be opened.
 pub fn start(address: SocketAddr, key: PanelKey, requests: Sender<Request>, log: Log) -> io::Result<SocketAddr> {
+    let mut salt = [0; 32];
+    getrandom::fill(&mut salt).map_err(|error| io::Error::other(format!("the system's random source failed: {error}")))?;
     let listener = TcpListener::bind(address)?;
     let listening = listener.local_addr()?;
-    let panel = Arc::new(Panel { key, requests, failures: Mutex::default(), notice: Mutex::default(), log });
+    let panel = Arc::new(Panel { key, requests, failures: Mutex::default(), notice: Mutex::default(), salt, shown: Mutex::default(), log });
     std::thread::Builder::new().name("moderation panel".into()).spawn(move || serve(&listener, &panel))?;
     Ok(listening)
 }
@@ -286,15 +299,42 @@ impl Panel {
         let Ok(view) = answer.recv_timeout(ANSWER_TIME) else { return Response::status(503) };
         let notice = self.notice.lock().unwrap_or_else(PoisonError::into_inner).take();
         let notice = notice.filter(|(at, _)| now.saturating_duration_since(*at) < NOTICE_TIME).map(|(_, text)| text);
-        Response::html(render(&view, key, notice.as_deref()))
+        self.list(&view, now);
+        Response::html(render(&view, key, notice.as_deref(), &|address: IpAddr| self.reference(address)))
+    }
+
+    /// The page's reference to `address`: the same at every listing, and no way back to the
+    /// address without the panel's salt.
+    fn reference(&self, address: IpAddr) -> String {
+        let mut hash = Sha256::new();
+        hash.update(self.salt);
+        hash.update(address.to_string());
+        hash.finalize()[..12].iter().fold(String::with_capacity(24), |mut reference, byte| {
+            let _ = write!(reference, "{byte:02x}");
+            reference
+        })
+    }
+
+    /// Keeps the references to the addresses `view` lists, for the forms its page posts.
+    fn list(&self, view: &View, now: Instant) {
+        let mut shown = self.shown.lock().unwrap_or_else(PoisonError::into_inner);
+        shown.retain(|_, (_, listed)| now.saturating_duration_since(*listed) < SHOWN_TIME);
+        let bans = view.chat_shadowbans.iter().chain(&view.ip_bans).map(|(address, _)| *address);
+        for address in view.players.iter().map(|player| player.address).chain(bans) {
+            shown.insert(self.reference(address), (address, now));
+        }
     }
 
     /// Does what the form asks and sends the browser back to the page, where its outcome shows
     /// once: reloading that page does nothing again.
     fn act(&self, key: &str, form: &[u8], now: Instant) -> Response {
-        let outcome = match action(&String::from_utf8_lossy(form)) {
-            None => "Nothing was ticked.".to_owned(),
-            Some(action) => {
+        let asked = {
+            let shown = self.shown.lock().unwrap_or_else(PoisonError::into_inner);
+            action(&String::from_utf8_lossy(form), |reference| shown.get(reference).map(|&(address, _)| address))
+        };
+        let outcome = match asked {
+            Err(outcome) => outcome.to_owned(),
+            Ok(action) => {
                 let (reply, answer) = mpsc::channel();
                 if self.requests.send(Request::Act(action, reply)).is_err() {
                     return Response::status(503);
@@ -307,38 +347,42 @@ impl Panel {
     }
 }
 
-/// The action a posted form asks: its `action`, and the players (`address|name`) or bans
-/// (`chat|address`, `ip|address`) it ticked; `None` when it ticked none.
-fn action(form: &str) -> Option<Action> {
+/// The action a posted form asks: its `action`, and the players (`reference|name`) or bans
+/// (`chat|reference`, `ip|reference`) it ticked, `address` giving each reference's address; the
+/// outcome for the page instead when it ticked none the panel still knows.
+fn action(form: &str, address: impl Fn(&str) -> Option<IpAddr>) -> Result<Action, &'static str> {
     let fields = fields(form);
     let values = |name: &'static str| fields.iter().filter(move |(field, _)| field == name).map(|(_, value)| value.as_str()).take(MAX_TARGETS);
     let players = || -> Vec<(IpAddr, String)> {
         values("player")
             .filter_map(|player| {
-                let (address, name) = player.split_once('|')?;
+                let (reference, name) = player.split_once('|')?;
                 let name = name.chars().filter(|character| !character.is_control()).take(crate::protocol::NICKNAME_CHARACTERS).collect();
-                Some((moderation::address(address.parse().ok()?), name))
+                Some((address(reference)?, name))
             })
             .collect()
     };
-    let action = match values("action").next()? {
-        "chat-shadowban" => Action::ChatShadowban(players()),
-        "ip-ban" => Action::IpBan(players()),
-        "lift" => {
+    let action = match values("action").next() {
+        Some("chat-shadowban") => Action::ChatShadowban(players()),
+        Some("ip-ban") => Action::IpBan(players()),
+        Some("lift") => {
             let (mut chat, mut ip) = (Vec::new(), Vec::new());
             for ban in values("ban") {
-                let parsed = |address: &str| address.parse().ok().map(moderation::address);
                 match ban.split_once('|') {
-                    Some(("chat", address)) => chat.extend(parsed(address)),
-                    Some(("ip", address)) => ip.extend(parsed(address)),
+                    Some(("chat", reference)) => chat.extend(address(reference)),
+                    Some(("ip", reference)) => ip.extend(address(reference)),
                     _ => {}
                 }
             }
             Action::Lift { chat, ip }
         }
-        _ => return None,
+        _ => return Err("Nothing was ticked."),
     };
-    (!action.is_empty()).then_some(action)
+    if !action.is_empty() {
+        return Ok(action);
+    }
+    let ticked = values("player").chain(values("ban")).next().is_some();
+    Err(if ticked { "The page was out of date: refresh it and tick again." } else { "Nothing was ticked." })
 }
 
 /// A query's or form's `name=value` pairs, `+` and `%XX` decoded.
@@ -482,7 +526,6 @@ th{font-size:12px;font-weight:600;color:var(--muted)}
 tbody tr:last-child td{border-bottom:0}
 td.pick{width:1%}
 td.empty{padding:22px;text-align:center;color:var(--muted)}
-.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px}
 .tag{padding:2px 8px;border-radius:999px;background:var(--tag);color:var(--muted);font-size:12px}
 label{cursor:pointer}
 .actions{flex:none;width:176px;position:sticky;top:16px;display:flex;flex-direction:column;gap:8px}
@@ -492,7 +535,8 @@ button.danger{color:var(--danger);border-color:var(--danger)}
 @media (max-width:720px){.layout{flex-direction:column}.actions{position:static;width:100%;flex-direction:row;flex-wrap:wrap}}
 ";
 
-fn render(view: &View, key: &str, notice: Option<&str>) -> String {
+/// The page: `reference` gives what a box sends for an address, which the page never shows.
+fn render(view: &View, key: &str, notice: Option<&str>, reference: &dyn Fn(IpAddr) -> String) -> String {
     let url = escape(&url(key));
     let mut page = String::with_capacity(16 * 1024);
     let _ = write!(
@@ -509,10 +553,10 @@ fn render(view: &View, key: &str, notice: Option<&str>) -> String {
     let _ = write!(
         page,
         "<section>\n<h2>Players</h2>\n<form method=\"post\" action=\"{url}\" class=\"layout\">\n<div class=\"table\"><table>\n\
-         <thead><tr><th></th><th>Name</th><th>IP address</th><th>Game</th><th>Online for</th><th>Version</th><th>Chat</th></tr></thead>\n<tbody>\n"
+         <thead><tr><th></th><th>Name</th><th>Game</th><th>Online for</th><th>Version</th><th>Chat</th></tr></thead>\n<tbody>\n"
     );
     if view.players.is_empty() {
-        page.push_str("<tr><td class=\"empty\" colspan=\"7\">No one is signed in.</td></tr>\n");
+        page.push_str("<tr><td class=\"empty\" colspan=\"6\">No one is signed in.</td></tr>\n");
     }
     for (index, player) in view.players.iter().enumerate() {
         let game = match player.game {
@@ -524,10 +568,9 @@ fn render(view: &View, key: &str, notice: Option<&str>) -> String {
         let _ = writeln!(
             page,
             "<tr><td class=\"pick\"><input type=\"checkbox\" id=\"p{index}\" name=\"player\" value=\"{}\"></td><td><label for=\"p{index}\">{}</label></td>\
-             <td class=\"mono\">{}</td><td>{game}</td><td>{}</td><td>{}</td><td>{chat}</td></tr>",
-            escape(&format!("{}|{}", player.address, player.name)),
+             <td>{game}</td><td>{}</td><td>{}</td><td>{chat}</td></tr>",
+            escape(&format!("{}|{}", reference(player.address), player.name)),
             escape(&player.name),
-            player.address,
             duration(player.online),
             escape(&player.version),
         );
@@ -545,16 +588,17 @@ fn render(view: &View, key: &str, notice: Option<&str>) -> String {
     let _ = write!(
         page,
         "<section>\n<h2>Bans</h2>\n<form method=\"post\" action=\"{url}\" class=\"layout\">\n<div class=\"table\"><table>\n\
-         <thead><tr><th></th><th>Ban</th><th>IP address</th><th>Name</th></tr></thead>\n<tbody>\n"
+         <thead><tr><th></th><th>Ban</th><th>Name</th></tr></thead>\n<tbody>\n"
     );
     if bans.is_empty() {
-        page.push_str("<tr><td class=\"empty\" colspan=\"4\">No one is banned.</td></tr>\n");
+        page.push_str("<tr><td class=\"empty\" colspan=\"3\">No one is banned.</td></tr>\n");
     }
     for (index, (kind, label, address, name)) in bans.iter().enumerate() {
         let _ = writeln!(
             page,
-            "<tr><td class=\"pick\"><input type=\"checkbox\" id=\"b{index}\" name=\"ban\" value=\"{kind}|{address}\"></td>\
-             <td><label for=\"b{index}\">{label}</label></td><td class=\"mono\">{address}</td><td>{}</td></tr>",
+            "<tr><td class=\"pick\"><input type=\"checkbox\" id=\"b{index}\" name=\"ban\" value=\"{kind}|{}\"></td>\
+             <td><label for=\"b{index}\">{label}</label></td><td>{}</td></tr>",
+            reference(*address),
             escape(name),
         );
     }
@@ -592,7 +636,7 @@ mod tests {
     /// every action alike: the actions it was asked.
     fn served(test: impl FnOnce(&Panel)) -> Vec<Action> {
         let (requests, receiver) = mpsc::channel();
-        let panel = Panel { key: PanelKey::from_text(KEY).unwrap(), requests, failures: Mutex::default(), notice: Mutex::default(), log: Arc::new(|_: &str| {}) };
+        let panel = Panel { key: PanelKey::from_text(KEY).unwrap(), requests, failures: Mutex::default(), notice: Mutex::default(), salt: [7; 32], shown: Mutex::default(), log: Arc::new(|_: &str| {}) };
         let view = View {
             players: vec![Player {
                 name: "O'Neil".into(),
@@ -663,15 +707,16 @@ mod tests {
     }
 
     #[test]
-    fn the_page_lists_players_and_bans_and_escapes_what_players_sent() {
+    fn the_page_lists_players_and_bans_without_their_addresses_and_escapes_what_players_sent() {
         served(|panel| {
             let response = panel.respond(ip("192.0.2.1"), &get(&format!("{PATH}?key={KEY}")), Instant::now());
             assert_eq!(response.status, 200);
             let page = String::from_utf8(response.body.clone()).unwrap();
-            assert!(page.contains("value=\"10.0.0.2|O&#39;Neil\""), "{page}");
+            assert!(page.contains(&format!("value=\"{}|O&#39;Neil\"", panel.reference(ip("10.0.0.2")))), "{page}");
             assert!(page.contains("&lt;script&gt;alert(1)&lt;/script&gt;") && !page.contains("<script"));
             assert!(page.contains("3 (host)") && page.contains("1 min") && page.contains(">shadowbanned<"));
-            assert!(page.contains("value=\"chat|198.51.100.2\"") && page.contains("Spammer"));
+            assert!(page.contains(&format!("value=\"chat|{}\"", panel.reference(ip("198.51.100.2")))) && page.contains("Spammer"));
+            assert!(!page.contains("10.0.0.2") && !page.contains("198.51.100.2"), "no address shows, not even in the source");
             assert!(page.contains(&format!("action=\"{PATH}?key={KEY}\"")));
             let sent = String::from_utf8(response.bytes()).unwrap();
             for header in ["Cache-Control: no-store", "Referrer-Policy: no-referrer", "Content-Security-Policy: default-src 'none'", "X-Frame-Options: DENY"] {
@@ -685,23 +730,29 @@ mod tests {
         let actions = served(|panel| {
             let (owner, now) = (ip("192.0.2.1"), Instant::now());
             let page = format!("{PATH}?key={KEY}");
-            let posted = panel.respond(owner, &post(&page, "player=10.0.0.2%7CO%27Neil&player=%3A%3Affff%3A10.0.0.3%7CBob+Two&player=junk&action=chat-shadowban"), now);
+            let (player, ban) = (panel.reference(ip("10.0.0.2")), panel.reference(ip("198.51.100.2")));
+            let shown_after = |form: &str| {
+                assert_eq!(panel.respond(owner, &post(&page, form), now).status, 303);
+                String::from_utf8(panel.respond(owner, &get(&page), now).body).unwrap()
+            };
+            let early = shown_after(&format!("player={player}%7CO%27Neil&action=chat-shadowban"));
+            assert!(early.contains("The page was out of date"), "a reference the page has not listed yet is refused");
+            assert!(!String::from_utf8(panel.respond(owner, &get(&page), now).body).unwrap().contains("out of date"), "the outcome shows once");
+            let unlisted = panel.reference(ip("10.0.0.3"));
+            let posted = panel.respond(owner, &post(&page, &format!("player={player}%7CO%27Neil&player={unlisted}%7CBob&player=junk&action=chat-shadowban")), now);
             assert_eq!((posted.status, posted.location.as_deref()), (303, Some(page.as_str())));
-            let shown = String::from_utf8(panel.respond(owner, &get(&page), now).body).unwrap();
-            assert!(shown.contains("<p class=\"notice\">Done &amp; dusted.</p>"));
-            assert!(!String::from_utf8(panel.respond(owner, &get(&page), now).body).unwrap().contains("Done"), "the outcome shows once");
-            panel.respond(owner, &post(&page, "action=ip-ban&player=2001%3Adb8%3A%3A1%7CSix"), now);
-            panel.respond(owner, &post(&page, "action=lift&ban=chat%7C198.51.100.2&ban=ip%7C10.0.0.9&ban=bogus"), now);
-            assert_eq!(panel.respond(owner, &post(&page, "action=ip-ban"), now).status, 303);
-            assert!(String::from_utf8(panel.respond(owner, &get(&page), now).body).unwrap().contains("Nothing was ticked."));
+            assert!(String::from_utf8(panel.respond(owner, &get(&page), now).body).unwrap().contains("<p class=\"notice\">Done &amp; dusted.</p>"));
+            shown_after(&format!("action=ip-ban&player={player}%7CO%27Neil"));
+            shown_after(&format!("action=lift&ban=chat%7C{ban}&ban=ip%7C{player}&ban=bogus"));
+            assert!(shown_after("action=ip-ban").contains("Nothing was ticked."));
             assert_eq!(panel.respond(owner, &request("DELETE", &page, ""), now).status, 405);
         });
         assert_eq!(
             actions,
             [
-                Action::ChatShadowban(vec![(ip("10.0.0.2"), "O'Neil".into()), (ip("10.0.0.3"), "Bob Two".into())]),
-                Action::IpBan(vec![(ip("2001:db8::1"), "Six".into())]),
-                Action::Lift { chat: vec![ip("198.51.100.2")], ip: vec![ip("10.0.0.9")] },
+                Action::ChatShadowban(vec![(ip("10.0.0.2"), "O'Neil".into())]),
+                Action::IpBan(vec![(ip("10.0.0.2"), "O'Neil".into())]),
+                Action::Lift { chat: vec![ip("198.51.100.2")], ip: vec![ip("10.0.0.2")] },
             ]
         );
     }
