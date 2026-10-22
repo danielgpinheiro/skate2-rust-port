@@ -50,9 +50,14 @@ PC. Requires your own legally obtained Xbox 360 copy of Skate 2 to run, you will
   through packet loss and jitter, and challenge rules still run the same on every machine.
 - **Bigger lobbies.** Up to 8 skaters, a **Lobby Browser** that lists the games on the server,
   and **lobby chat** (press T).
-- **Display Settings.** A frame-rate cap (60, 120, your monitor's refresh rate or uncapped), a
-  frame-rate counter, borderless fullscreen (Alt+Enter works too), and switches for PostFX and
-  the fisheye lens.
+- **Watch a challenge in progress.** Join a game mid-challenge, or pick **Leave Challenge** in
+  the pause menu, and you wait in the pre-game lobby watching the players still in the challenge
+  as ghosts. They never see you.
+- **Display Settings.** A frame-rate cap (60, 120, your monitor's refresh rate or uncapped), VSync
+  (on: no tearing; off: frames show at once, with the cap still applied), a resolution scale
+  (50% to 200%: above 100% the world renders larger and is scaled down for a sharper picture,
+  below it renders smaller for speed; the HUD always stays sharp), a frame-rate counter,
+  borderless fullscreen (Alt+Enter works too), and switches for PostFX and the fisheye lens.
 - **Better Party Play.** No pedestrians or traffic in the way and your own career skater is in the
   list to choose from.
 
@@ -86,6 +91,14 @@ PC. Requires your own legally obtained Xbox 360 copy of Skate 2 to run, you will
 
 What Linux needs (drivers, libraries, the Steam Deck) is in [docs/release/linux.md](docs/release/linux.md).
 
+### If the game closes or shows nothing
+
+- A message names the error and your graphics card, and a report is saved to
+  `saves\crash_reports` beside the game. Send both with your report.
+- To try the other graphics API, make a `.bat` file beside the game with `set WGPU_BACKEND=dx12`
+  (or `vulkan`) on one line and `skate2-pc.exe` on the next, and run it. `set SKATE2_NO_MSAA=1`
+  turns antialiasing off.
+
 ### Online
 
 Choose **Online** on the main menu and pick a nickname. Releases connect to the project's
@@ -95,13 +108,15 @@ game.
 **Hosting:** `skate2-pc --server <ip:port>` runs the game in dedicated server mode, on Windows or
 Linux. The Linux zip also holds `skate2-server`, the server alone, for a VPS or any machine
 without a display. Players join only a server of the same release; `--update` on either program
-puts the newest release in place.
+puts the newest release in place. A server can also run a moderation panel, with chat shadowbans
+and IP bans: see [the server's documentation](docs/online/implementation.md#the-server).
 
 ### Updates
 
 Each time it starts, the game looks for a newer release and offers it on the main menu. **Yes**
-downloads it, checks its signature and starts the new version. Settings and saves are never
-replaced. Online play on our community servers needs the newest version.
+downloads it, checks its signature and starts the new version, which then shows what changed.
+Settings and saves are never replaced. Online play on our community servers needs the newest
+version.
 
 ### Saves and settings
 

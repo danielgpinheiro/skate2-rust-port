@@ -276,6 +276,7 @@ impl<T, C> SelectedSession<T, C> {
                 ghosted: render.ghosted && !borrowed,
                 entity_type: if borrowed { 0x822 } else { 0x122 },
                 players_recipe: skater.recipe_load.asset_id() == player,
+                lobby_ghost: false,
             });
         }
         Ok(visuals)

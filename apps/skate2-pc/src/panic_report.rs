@@ -15,6 +15,16 @@ use std::{
 
 static SIM_PANIC: OnceLock<String> = OnceLock::new();
 static REPORT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static GPU: OnceLock<String> = OnceLock::new();
+
+/// The adapter the renderer chose, named in every later report.
+pub(crate) fn set_gpu(adapter: String) {
+    let _ = GPU.set(adapter);
+}
+
+pub(crate) fn gpu() -> Option<&'static str> {
+    GPU.get().map(String::as_str)
+}
 
 /// Install once at process startup, before any worker can panic. Resolving the
 /// save directory here avoids consulting profile/save locks inside the hook.
@@ -30,17 +40,20 @@ pub(crate) fn install() {
             }
         });
     let executable = std::env::current_exe().ok();
+    // A player's launch (main.rs), who sees no console.
+    let player = crate::game_update::player_launch();
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current();
         let thread_name = thread.name().unwrap_or("<unnamed>");
         let reason = info.to_string();
         let report = format!(
-            "Skate 2 PC panic\nVersion: {}\nExecutable: {}\nThread: {thread_name} ({:?})\n\n{reason}\n\nBacktrace (captured automatically):\n{}\n",
+            "Skate 2 PC panic\nVersion: {}\nExecutable: {}\nGPU: {}\nThread: {thread_name} ({:?})\n\n{reason}\n\nBacktrace (captured automatically):\n{}\n",
             env!("CARGO_PKG_VERSION"),
             executable
                 .as_deref()
                 .map_or_else(|| "<unknown>".into(), |path| path.display().to_string()),
+            gpu().unwrap_or("<not chosen yet>"),
             thread.id(),
             Backtrace::force_capture(),
         );
@@ -64,6 +77,14 @@ pub(crate) fn install() {
             }
         }
         previous_hook(info);
+        // The window thread's panic ends the game; without this the window just closes. The
+        // SIM thread's reaches the player through the window thread's error instead.
+        if player && thread_name == "main" {
+            crate::game_root::show_error(&format!(
+                "Skate 2 stopped because of an error:\n\n{reason}\n\nGPU: {}\n{destination}",
+                gpu().unwrap_or("<not chosen yet>")
+            ));
+        }
     }));
 }
 

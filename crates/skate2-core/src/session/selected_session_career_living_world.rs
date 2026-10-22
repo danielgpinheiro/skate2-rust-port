@@ -33,6 +33,8 @@ use std::{
 const SPAWN_FLAGS: (bool, bool, bool, bool, bool, bool) = (false, false, true, true, true, true);
 /// `PhysicsLineTestBatch` flags `BF_GroundDmo`.
 const BF_GROUND_DMO: u32 = 3;
+/// `World::AcquireLineBatch(batchID)` (`0x827b1a58`): `BF_Default`.
+const BF_DEFAULT: u32 = 7;
 #[path = "selected_session_career_big_black.rs"]
 mod big_black;
 
@@ -224,6 +226,60 @@ impl Owners<'_, '_> {
         result
     }
 
+    /// `LivingWorld.ActivateSpectatorWaypoint` (0x82893da8): the GUID's waypoint group, when it has
+    /// waypoints, gets `WaypointMan::ActivateSpectatorWaypoint` (0x82ce9180): the census-managed
+    /// cull first, then its forced spectators queued, or the group activated without any.
+    fn activate_spectator_waypoint(
+        &mut self,
+        guid: u64,
+        force_spawn_percentage: f32,
+        category_group: u64,
+        keep: &[u32],
+    ) -> Result<(), String> {
+        let owner = self.living();
+        let (prop, group_guid, waypoints) = {
+            let living = owner.lock().map_err(|_| "LivingWorld lock")?;
+            let Some(props) = living.props.as_deref() else { return Ok(()) };
+            let Some(prop) = props.waypoint_group_by_guid(guid) else { return Ok(()) };
+            let group = props.group(prop)?;
+            (prop, group.guid()?, u32::try_from(group.points.len()).map_err(|_| "waypoint count")?)
+        };
+        if waypoints == 0 {
+            return Ok(());
+        }
+        self.census_managed_cull(None, keep)?;
+        let max_force_spectators = self
+            .cvars
+            .try_max_num_force_spectators()
+            .map_err(|e| format!("kMaxNumForceSpectators: {e:?}"))?;
+        let mut living = owner.lock().map_err(|_| "LivingWorld lock")?;
+        let living = &mut *living;
+        if living.waypoint_man.activate(waypoints, group_guid, force_spawn_percentage, category_group, max_force_spectators)? {
+            living.props.as_deref_mut().ok_or("spectator PropMan absent")?.activate_prop(prop)?;
+        }
+        Ok(())
+    }
+
+    /// `LivingWorld.DeactivateSpectatorWaypoint` (0x8288e488): the GUID's waypoint group gets
+    /// `WaypointMan::DeactivateSpectatorWaypoint(group, true)` (0x82ce8ed8): its queued activation
+    /// dropped, the group deactivated and each locked waypoint's pedestrian culled
+    /// (`RequestExplicitCull`).
+    fn deactivate_spectator_waypoint(&mut self, guid: u64) -> Result<(), String> {
+        let owner = self.living();
+        let released = {
+            let mut living = owner.lock().map_err(|_| "LivingWorld lock")?;
+            let living = &mut *living;
+            let Some(props) = living.props.as_deref_mut() else { return Ok(()) };
+            let Some(prop) = props.waypoint_group_by_guid(guid) else { return Ok(()) };
+            living.waypoint_man.deactivate(props.group(prop)?.guid()?);
+            props.deactivate_waypoint_group(prop)?
+        };
+        for pedestrian in released {
+            self.request_explicit_cull(pedestrian)?;
+        }
+        Ok(())
+    }
+
     /// `Pedestrian::SetCurrentWaypoint` (0x82e6e600) to the group's first waypoint.
     fn set_current_waypoint(&mut self, id: u32, guid: u64) -> Result<(), String> {
         let owner = self.living();
@@ -413,6 +469,69 @@ impl Owners<'_, '_> {
                 })
             })
             .collect())
+    }
+
+    /// A crowd generator's batch, run at once: `AcquireLineBatch(BF_Default)`, each `AddTest`
+    /// until the batch refuses one, then `GetResult` of each it took. A hit lies on its line,
+    /// whose W lane is the tested start's.
+    fn crowd_line_tests(
+        &mut self,
+        tests: &[([f32; 4], [f32; 4], f32)],
+    ) -> Result<Vec<Option<[f32; 4]>>, String> {
+        let (queries, dmos) = self.world.world_line_owners();
+        let queries = queries.ok_or("World line queries absent")?;
+        let dmos = dmos.ok_or("World DMO pool absent")?;
+        let batch = queries
+            .try_acquire_line_batch(dmos, "cCrowdPositionAndGenerationState::SubmitLineTests", BF_DEFAULT)
+            .map_err(|e| format!("crowd line batch: {e:?}"))?;
+        let mut hits = Vec::with_capacity(tests.len());
+        let result = (|| {
+            queries
+                .try_begin(&batch)
+                .map_err(|e| format!("crowd line batch: {e:?}"))?;
+            let mut taken = 0;
+            for &(start, end, fatness) in tests {
+                let input = CollisionLineInput {
+                    start: SkeletonRootVector::known(start),
+                    end: SkeletonRootVector::known(end),
+                    fatness,
+                };
+                if !queries
+                    .try_add_line(&batch, input)
+                    .map_err(|e| format!("crowd line test: {e:?}"))?
+                {
+                    break;
+                }
+                taken += 1;
+            }
+            queries
+                .try_end(
+                    &batch,
+                    self.ground,
+                    dmos,
+                    &mut crate::collision_line_numeric::HostCollisionLineNumeric,
+                )
+                .map_err(|e| format!("crowd line batch: {e:?}"))?;
+            queries
+                .try_sync(&batch)
+                .map_err(|e| format!("crowd line batch: {e:?}"))?;
+            for (index, &(start, ..)) in tests.iter().take(taken).enumerate() {
+                let index = u32::try_from(index).map_err(|_| "crowd line batch index")?;
+                let hit = queries
+                    .try_get_result(&batch, index)
+                    .map_err(|e| format!("crowd line result: {e:?}"))?;
+                hits.push(hit.map(|hit| {
+                    let xyz = hit.position.xyz;
+                    [xyz[0], xyz[1], xyz[2], start[3]]
+                }));
+            }
+            Ok::<_, String>(())
+        })();
+        queries
+            .try_release(&batch)
+            .map_err(|e| format!("crowd line batch: {e:?}"))?;
+        result?;
+        Ok(hits)
     }
 
     /// `LWDynamicObjectMan::GetDynamicObject`, then `CanResetDynamicObject` and
@@ -618,6 +737,10 @@ impl Owners<'_, '_> {
                 let results = self.line_tests(&tests).map_err(error)?;
                 characters::line_tests_answered(challenge, serial, results);
             }
+            LivingWorldOp::CrowdLineTests { serial, tests } => {
+                let results = self.crowd_line_tests(&tests).map_err(error)?;
+                crate::challenge::crowd::line_tests_answered(challenge, serial, results);
+            }
             LivingWorldOp::ResetDynamicObject(entity) => {
                 self.reset_dynamic_object(entity).map_err(error)?
             }
@@ -642,6 +765,17 @@ impl Owners<'_, '_> {
                     .collect();
                 self.census_managed_cull(Some(volume), &keep)
                     .map_err(error)?;
+            }
+            LivingWorldOp::ActivateSpectatorWaypoint { guid, force_spawn_percentage, category_group, keep } => {
+                let keep: Vec<u32> = keep
+                    .into_iter()
+                    .filter_map(|character| answers.pedestrian(character))
+                    .collect();
+                self.activate_spectator_waypoint(guid, force_spawn_percentage, category_group, &keep)
+                    .map_err(error)?;
+            }
+            LivingWorldOp::DeactivateSpectatorWaypoint { guid } => {
+                self.deactivate_spectator_waypoint(guid).map_err(error)?;
             }
             LivingWorldOp::AvoidVolumeAdded(volume) => {
                 self.frame
@@ -918,6 +1052,65 @@ impl<T, C> SelectedLiveSession<T, C> {
         }
     }
 
+    /// `CrowdPresentation::Update` (0x827e8320) of the challenge's crowd buffer, on the
+    /// presentation's recipes and pedestrian animation.
+    pub(in super::super) fn update_career_crowd_presentation(&mut self) -> Result<(), SelectedLiveError> {
+        let Some(career) = self.career.as_ref() else {
+            return Ok(());
+        };
+        let buffer = career.system.world().crowds.buffer.clone();
+        let world_owner = self
+            .inner
+            .world
+            .as_ref()
+            .ok_or_else(|| error("career world absent"))?;
+        let terrain = self
+            .inner
+            .terrain
+            .as_ref()
+            .ok_or_else(|| error("career terrain absent"))?;
+        let startup = terrain
+            .terrain_for(&world_owner.world)
+            .map_err(|e| error(format!("{e:?}")))?;
+        let player = self
+            .inner
+            .player
+            .as_mut()
+            .ok_or_else(|| error("career player absent"))?;
+        let owners = &mut player.selected.owners;
+        let cvars = owners.cvars.clone();
+        let recipe_owner = Arc::clone(&owners.living_world_recipes);
+        let mut recipe_runtime = recipe_owner
+            .lock()
+            .map_err(|_| error("RecipeMan owner lock poisoned"))?;
+        let graph_owner = Arc::clone(
+            owners
+                .graphs
+                .as_ref()
+                .ok_or_else(|| error("graph owners absent"))?,
+        );
+        let graph_guard = graph_owner
+            .lock()
+            .map_err(|_| error("graph owner lock poisoned"))?;
+        let mut frame = SelectedRecipeFrame {
+            challenge: None,
+            triggers: &startup.triggers,
+            pedestrian_animation: crate::selected_living_world_recipes::pedestrian_animation::PedestrianSessionAnimation {
+                startup: &owners.pedestrian_animation,
+                shared: &owners.animation,
+                world: &world_owner.world,
+            },
+            runtime: &mut recipe_runtime,
+            registry: owners.recipe_registry.as_mut().ok_or_else(|| error("mounted recipe registry absent"))?,
+            requests: owners.recipe_load.as_mut().ok_or_else(|| error("mounted recipe requests absent"))?.requests_mut(),
+            mounts: &owners.mounts,
+            vault: &owners.services.vault,
+            graphs: &graph_guard,
+            painter: &startup.layers,
+        };
+        frame.update_crowd(&buffer, &cvars).map_err(error)
+    }
+
     /// `Sk8ChallengeSystem::GameUnload`'s `cChallengeCharacterManager::GameUnload` and
     /// `cChallengeLivingWorldManager::GameUnload`, applied before the career goes.
     pub(crate) fn unload_career_living_world(&mut self) -> Result<(), SelectedLiveError> {
@@ -931,6 +1124,17 @@ impl<T, C> SelectedLiveSession<T, C> {
         characters::game_unload(challenge);
         living_world::game_unload(challenge);
         self.apply_career_living_world()?;
+        // Presentation::GameUnload (0x827f1390) flushes the crowd presentation.
+        if let Some(player) = self.inner.player.as_ref() {
+            player
+                .selected
+                .owners
+                .living_world_recipes
+                .lock()
+                .map_err(|_| error("RecipeMan owner lock poisoned"))?
+                .crowd
+                .flush();
+        }
         let world = &self
             .inner
             .world

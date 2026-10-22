@@ -1,7 +1,9 @@
-//! `Sk8::Audio::AudioAssetManager` as the emitter system uses it: the swap banks (asset banks
+//! `Sk8::Audio::AudioAssetManager` as the audio system uses it: the swap banks (asset banks
 //! 32-37) whose slots take the emitter banks of `data\audio\emitters.big` and the DLC emitter
-//! data, the slots' `tAudioAssetInfo`, the async load queue and the unload list
-//! (`Update` 0x82a7a900: `UpdateUnloads`, `UpdateAsyncLoads`, `UpdateUnloadsFromSwapBank`).
+//! data, the fixed asset banks `AsyncLoadAt` loads into memory the caller set aside (the traffic
+//! banks 10 and 11, the crowd bank 14), the slots' `tAudioAssetInfo`, the async load queue and
+//! the unload list (`Update` 0x82a7a900: `UpdateUnloads`, `UpdateAsyncLoads`,
+//! `UpdateUnloadsFromSwapBank`).
 //!
 //! The file loader reads from memory: a load started by `UpdateAsyncLoads` completes on its next
 //! call, where natively the disc read takes one or more updates. A bank unloaded without
@@ -62,11 +64,18 @@ struct SwapBank {
     slots: [AssetInfo; MAX_SWAP_SLOTS],
 }
 
-/// `tAsyncInfo`: an `AsyncLoadAtImp` request into a swap slot.
+/// A `tAudioAssetInfo` of `mAssetInfo[bankID][sfxID]`: a swap bank's slot (asset bank
+/// `32 + index`) or a slot of a fixed asset bank (below 32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SlotRef {
+    Swap(usize, usize),
+    Bank(usize, usize),
+}
+
+/// `tAsyncInfo`: an `AsyncLoadAtImp` request.
 #[derive(Debug, Clone)]
 struct AsyncRequest {
-    bank: usize,
-    slot: usize,
+    slot: SlotRef,
     kind: u32,
     filename: String,
 }
@@ -81,7 +90,9 @@ pub struct AudioAssetManager {
     /// is missing, which natively fails the load).
     load_op: Option<Option<Arc<[u8]>>>,
     /// `mUnloadList`: the slots waiting for their AEMS bank to leave.
-    unload_list: Vec<(usize, usize)>,
+    unload_list: Vec<SlotRef>,
+    /// The fixed asset banks' slots by (bank, slot).
+    bank_slots: HashMap<(usize, usize), AssetInfo>,
     /// The file loader's files by lower-case path (`data\audio\emitters.big|<bank>`).
     files: HashMap<String, Arc<[u8]>>,
 }
@@ -95,6 +106,52 @@ impl AudioAssetManager {
     /// Adds files the loader can read (lower-case paths).
     pub fn add_files(&mut self, files: impl IntoIterator<Item = (String, Arc<[u8]>)>) {
         self.files.extend(files);
+    }
+
+    /// The size of a file the loader can read (`rw::core::Big::LocateEntry`'s entry size).
+    #[must_use]
+    pub fn file_size(&self, file_name: &str) -> Option<usize> {
+        self.files.get(&file_name.to_lowercase()).map(|bytes| bytes.len())
+    }
+
+    fn asset(&self, slot: SlotRef) -> Option<&AssetInfo> {
+        match slot {
+            SlotRef::Swap(bank, slot) => Some(&self.banks[bank].slots[slot]),
+            SlotRef::Bank(bank, slot) => self.bank_slots.get(&(bank, slot)),
+        }
+    }
+
+    fn asset_mut(&mut self, slot: SlotRef) -> &mut AssetInfo {
+        match slot {
+            SlotRef::Swap(bank, slot) => &mut self.banks[bank].slots[slot],
+            SlotRef::Bank(bank, slot) => self.bank_slots.entry((bank, slot)).or_default(),
+        }
+    }
+
+    /// `AsyncLoadAt` 0x82a7a9b8 (`AsyncLoadAtImp` 0x82a79d98, `AsyncLoadImp` 0x82a79bc8) into a
+    /// fixed asset bank's slot: the slot's resolved AEMS bank starts leaving, and the load is
+    /// queued into the caller's memory (`preAllocated`).
+    pub fn async_load_at(&mut self, file_name: &str, bank: usize, slot: usize, kind: u32, aems: &mut Aems, core: &mut AudioCore) {
+        let slot = SlotRef::Bank(bank, slot);
+        let asset = self.asset_mut(slot);
+        asset.status = AssetStatus::Loading;
+        asset.ref_count = 1;
+        if asset.resolved && asset.kind == ASSET_AEMS_BANK {
+            aems.begin_remove_module_bank(core, asset.handle);
+        }
+        asset.pre_allocated = true;
+        self.current.push_back(AsyncRequest { slot, kind, filename: file_name.to_owned() });
+    }
+
+    /// `AsyncStatus` 0x82a792f8 (`AsyncStatusImp` 0x82a78630) of a fixed asset bank's slot.
+    #[must_use]
+    pub fn async_status(&self, bank: usize, slot: usize) -> AssetStatus {
+        self.asset(SlotRef::Bank(bank, slot)).map_or(AssetStatus::Empty, |asset| asset.status)
+    }
+
+    /// `UnLoad` 0x82a7aa38: `UnLoadImp` of a fixed asset bank's slot with `unresolveData`.
+    pub fn unload_bank_slot(&mut self, bank: usize, slot: usize, aems: &mut Aems, core: &mut AudioCore) {
+        self.unload(SlotRef::Bank(bank, slot), true, aems, core);
     }
 
     /// `CreateSwapBank` 0x82a78860 / 0x82a78988: the first empty bank; every bank's file names
@@ -129,7 +186,7 @@ impl AudioAssetManager {
                 None => return -1,
             }
         }
-        if self.current.iter().any(|request| request.bank == bank && request.slot == slot) {
+        if self.current.iter().any(|request| request.slot == SlotRef::Swap(bank, slot)) {
             return -1;
         }
         slot as i32
@@ -156,7 +213,7 @@ impl AudioAssetManager {
         if asset.resolved && asset.kind == ASSET_AEMS_BANK {
             aems.begin_remove_module_bank(core, asset.handle);
         }
-        self.current.push_back(AsyncRequest { bank, slot, kind, filename: file_name.to_owned() });
+        self.current.push_back(AsyncRequest { slot: SlotRef::Swap(bank, slot), kind, filename: file_name.to_owned() });
         self.banks[bank].file_names[slot] = file_name.to_owned();
     }
 
@@ -173,15 +230,15 @@ impl AudioAssetManager {
         if !self.banks[bank].slot_loaded[slot] {
             return;
         }
-        self.unload(bank, slot, unresolve, aems, core);
+        self.unload(SlotRef::Swap(bank, slot), unresolve, aems, core);
         if self.banks[bank].slots[slot].status == AssetStatus::Empty {
             self.banks[bank].slot_loaded[slot] = false;
         }
     }
 
     /// `UnLoadImp` 0x82a7a1d0.
-    fn unload(&mut self, bank: usize, slot: usize, unresolve: bool, aems: &mut Aems, core: &mut AudioCore) {
-        let asset = &mut self.banks[bank].slots[slot];
+    fn unload(&mut self, slot: SlotRef, unresolve: bool, aems: &mut Aems, core: &mut AudioCore) {
+        let asset = self.asset_mut(slot);
         if asset.ref_count == 0 {
             return;
         }
@@ -198,7 +255,7 @@ impl AudioAssetManager {
             if asset.kind == ASSET_AEMS_BANK {
                 aems.begin_remove_module_bank(core, asset.handle);
             }
-            self.unload_list.push((bank, slot));
+            self.unload_list.push(slot);
             return;
         }
         asset.status = AssetStatus::Empty;
@@ -256,7 +313,7 @@ impl AudioAssetManager {
     pub fn unload_all_swap_slots(&mut self, bank: usize, aems: &mut Aems, core: &mut AudioCore) {
         for slot in 0..self.banks[bank].num_slots {
             if self.banks[bank].slot_loaded[slot] {
-                self.unload(bank, slot, true, aems, core);
+                self.unload(SlotRef::Swap(bank, slot), true, aems, core);
                 if self.banks[bank].slots[slot].status == AssetStatus::Empty {
                     self.banks[bank].slot_loaded[slot] = false;
                 }
@@ -282,8 +339,8 @@ impl AudioAssetManager {
     fn update_unloads(&mut self, aems: &Aems) {
         let mut index = 0;
         while index < self.unload_list.len() {
-            let (bank, slot) = self.unload_list[index];
-            let asset = &mut self.banks[bank].slots[slot];
+            let slot = self.unload_list[index];
+            let asset = self.asset_mut(slot);
             let done = match asset.kind {
                 ASSET_AEMS_BANK => aems.is_module_bank_removed(asset.handle),
                 ASSET_SPLICER_DATA => {
@@ -296,8 +353,8 @@ impl AudioAssetManager {
                 }
             };
             if done {
-                self.unload_list.remove(index);
                 *asset = AssetInfo { kind: ASSET_MAX, unload_count: 3, ..AssetInfo::default() };
+                self.unload_list.remove(index);
             } else {
                 index += 1;
             }
@@ -309,7 +366,7 @@ impl AudioAssetManager {
     fn update_async_loads(&mut self, aems: &mut Aems, core: &mut AudioCore) {
         if let Some(read) = self.load_op.take() {
             let Some(request) = self.current.pop_front() else { return };
-            let asset = &mut self.banks[request.bank].slots[request.slot];
+            let asset = self.asset_mut(request.slot);
             if asset.status == AssetStatus::Loading {
                 asset.data = read;
                 asset.status = AssetStatus::Loaded;
@@ -328,8 +385,8 @@ impl AudioAssetManager {
             }
             return;
         }
-        let Some(request) = self.current.front() else { return };
-        let asset = &mut self.banks[request.bank].slots[request.slot];
+        let Some(request) = self.current.front().cloned() else { return };
+        let asset = self.asset_mut(request.slot);
         if asset.resolved {
             if asset.kind == ASSET_AEMS_BANK {
                 if !aems.is_module_bank_removed(asset.handle) {

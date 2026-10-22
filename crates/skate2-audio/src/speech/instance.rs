@@ -16,6 +16,7 @@ use crate::rwac::{PluginRef, VoiceId};
 
 /// The mixes the instances' voices send to: `AudioCore::GetSpeechMasterSubMix`,
 /// `GetMasterSubMix` and `Sk8SpeechSystem::GetReverbVoice`.
+#[derive(Clone, Copy)]
 pub(super) struct SubMixes {
     pub speech_master: Option<PluginRef>,
     pub master: PluginRef,
@@ -230,7 +231,7 @@ impl SpeechInstance {
 
     /// `CreateDelayVoice` 0x82d3fb40: a stage 2 voice (sub mix, high pass, a delay of at most
     /// 0.15 s, low pass, pan, send to the master) the stream's delay send feeds.
-    fn create_delay_voice(&mut self, stream: usize, sub_mixes: &SubMixes, core: &mut AudioCore) {
+    pub(super) fn create_delay_voice(&mut self, stream: usize, sub_mixes: &SubMixes, core: &mut AudioCore) {
         if self.plug_in_indexes[stream][SEND_DELAY] == -1 || self.delay_voices[stream].is_some() {
             return;
         }
@@ -251,6 +252,25 @@ impl SpeechInstance {
         core.connect_send(PluginRef { voice: delay, index: DELAY_SEND }, Some(sub_mixes.master));
         if let Some(send) = self.plugin(stream, SEND_DELAY) {
             core.connect_send(send, Some(PluginRef { voice: delay, index: 0 }));
+        }
+    }
+
+    /// `DestroyDelayVoice` 0x82d3fd28: the stream's delay send loses its voice, which is released.
+    pub(super) fn destroy_delay_voice(&mut self, stream: usize, core: &mut AudioCore) {
+        if self.plug_in_indexes[stream][SEND_DELAY] == -1 {
+            return;
+        }
+        let Some(delay) = self.delay_voices[stream].take() else { return };
+        if let Some(send) = self.plugin(stream, SEND_DELAY) {
+            core.connect_send(send, None);
+        }
+        core.release_voice(delay);
+    }
+
+    /// `SetSubMix` 0x82d3e6f0: the stream's main send goes to `sub_mix`.
+    pub(super) fn set_sub_mix(&self, sub_mix: Option<PluginRef>, stream: usize, core: &mut AudioCore) {
+        if let Some(send) = self.plugin(stream, SEND) {
+            core.connect_send(send, sub_mix);
         }
     }
 
@@ -666,7 +686,7 @@ impl Sk8SpeechSystem {
     /// `SpeechSystem::StopAllSpeechOnInstance` 0x82d40000: both streams stop; one that was
     /// actually playing reports its speaker stopped (`EventStopped`, empty in this build) and
     /// forgets its channel, event and trigger.
-    pub(super) fn stop_all_speech_on_instance(&mut self, instance: usize, ctx: &mut SpeechCtx<'_>) {
+    pub(crate) fn stop_all_speech_on_instance(&mut self, instance: usize, ctx: &mut SpeechCtx<'_>) {
         if instance >= self.instances.len() {
             return;
         }

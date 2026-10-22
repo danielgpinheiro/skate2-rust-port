@@ -314,6 +314,8 @@ pub struct SpeechObjects {
 pub struct Sk8SpeechSystem {
     spch: Spch,
     instances: [SpeechInstance; INSTANCES],
+    /// The mixes the instances' voices send to.
+    sub_mixes: instance::SubMixes,
     files: Option<Arc<dyn StreamFiles>>,
     /// `mLWTimeBetweenEvents[character][event]`: when each character last played each
     /// living-world event, in audio-core seconds (single precision).
@@ -377,6 +379,7 @@ impl Sk8SpeechSystem {
         Self {
             spch: Spch::new(game_seed, DATA_RATE),
             instances,
+            sub_mixes,
             files: None,
             lw_time_between_events: vec![[0.0; LW_EVENTS.len()]; CHARACTERS],
             announcer: VoiceInfo { is_attached: true, ..VoiceInfo::default() },
@@ -398,6 +401,40 @@ impl Sk8SpeechSystem {
             sketchy_land: 0,
             contexts: None,
             channel_was_speaking: [false; 4],
+        }
+    }
+
+    /// `AudioCore::GetSpeechMasterSubMix` 0x82a7d8e0.
+    #[must_use]
+    pub fn speech_master_sub_mix(&self) -> Option<PluginRef> {
+        self.sub_mixes.speech_master
+    }
+
+    /// `SpeechInstance::SetSubMix` 0x82d3e6f0 of an instance's stream.
+    pub fn set_instance_sub_mix(&self, instance: usize, sub_mix: Option<PluginRef>, stream: usize, core: &mut AudioCore) {
+        if let Some(this) = self.instances.get(instance)
+            && stream < STREAMS
+        {
+            this.set_sub_mix(sub_mix, stream, core);
+        }
+    }
+
+    /// `SpeechSystem::CreateInstanceDelayVoice` 0x82d402a8: each stream's delay voice.
+    pub fn create_instance_delay_voice(&mut self, instance: usize, core: &mut AudioCore) {
+        let sub_mixes = self.sub_mixes;
+        if let Some(this) = self.instances.get_mut(instance) {
+            for stream in 0..STREAMS {
+                this.create_delay_voice(stream, &sub_mixes, core);
+            }
+        }
+    }
+
+    /// `SpeechSystem::DestroyInstanceDelayVoice` 0x82d40308.
+    pub fn destroy_instance_delay_voice(&mut self, instance: usize, core: &mut AudioCore) {
+        if let Some(this) = self.instances.get_mut(instance) {
+            for stream in 0..STREAMS {
+                this.destroy_delay_voice(stream, core);
+            }
         }
     }
 

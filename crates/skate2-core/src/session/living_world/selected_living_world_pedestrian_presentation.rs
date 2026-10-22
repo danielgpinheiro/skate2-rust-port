@@ -346,6 +346,54 @@ impl SelectedPedestrianVisual {
     }
 }
 
+/// BindConstants8280b5d0 copies the same SHLightingMan default probe as
+/// cPresVehicle; no spatial interpolation is performed. Update82811bd8 fetches
+/// the LOD distance array's element0 live (a null lookup is DefaultDataArea(4));
+/// GetLODDistances fetches and squares all three.
+fn living_world_lighting(vault:&Arc<crate::attribute_runtime::AttributeRuntimeVault>)
+    ->Result<([[f32;4];9],[f32;3]),String>{
+    let irradiance=crate::selected_living_world_vehicle_visual::vehicle_default_irradiance(vault)
+        .map_err(|e|e.to_string())?;
+    let rendering=vault.instance(skate2_formats::attrib::string_hash64("rendering"),
+        0x5141_6546_b54f_421d);
+    let mut distances=[0.;3];
+    for (index,value) in distances.iter_mut().enumerate(){
+        if let Some(data)=rendering.try_plain_array_data(0xf412_fc7b_191f_16c8,index as u32,
+            0xe222_28fb_b3c2_09d8,4).map_err(|e|e.to_string())? {
+            *value=f32::from_be_bytes(data.bytes().try_into().map_err(|_|"pedestrian LOD float width")?);
+        }
+    }
+    Ok((irradiance,distances))
+}
+
+/// A crowd target's cNoSimPresPedestrian as a pedestrian visual: at the origin,
+/// its mSpawnTransparency starting at zero (82812830), its geometry LOD 0.
+#[expect(clippy::too_many_arguments,reason="one no-sim pedestrian's presentation inputs")]
+pub(crate) fn no_sim_visual(id:u32,recipe_id:u64,model_key:u64,palette:&Arc<Mutex<CharacterPalette>>,
+    colours:[[f32;4];2],hierarchy:&Arc<CharacterHierarchy>,
+    pose:&crate::actor_animation_construction::initialization::bind_pose::OwnedAnimationPoseBuffer,
+    vault:&Arc<crate::attribute_runtime::AttributeRuntimeVault>,cvars:&InputCvarReferences,
+    actor:&crate::actor_construction::ActorConstruction)->Result<SelectedPedestrianVisual,String>{
+    let (irradiance,distances)=living_world_lighting(vault)?;
+    let (_,velocity)=crate::simulation_assembly_backend::constraint_session::dmo_living_world::local_skater_census_centre(actor)
+        .map_err(|e|e.to_string())?;
+    let bounds=palette.lock().map_err(|_|"crowd bounds palette lock")?
+        .scene().level_bounds(0).map_err(|e|e.to_string())?.ok_or("crowd pedestrian original bounds absent")?;
+    let local_bounds=[std::array::from_fn(|i|bounds.minimum[i]),std::array::from_fn(|i|bounds.maximum[i])];
+    let transform=[1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.];
+    let placement=PedestrianPlacement::new(transform,local_bounds);
+    let model=vault.instance(0x70f2_41a7_4e74_0a66,model_key);
+    Ok(SelectedPedestrianVisual{entity_id:id,recipe_id,model_key,spawn_opacity:0.,
+        palette:Arc::clone(palette),colours,irradiance,material_lod_distance:distances[0],
+        geometry_lod_squared:distances.map(|value|value*value),hierarchy:Arc::clone(hierarchy),
+        pose:pose.matrices().map_err(|e|format!("crowd pose: {e:?}"))?.map(Arc::from),transform,
+        local_bounds,bounds_center:placement.bounds_center,simulation_center_velocity:velocity,
+        world_bounds:placement.world_bounds,
+        opacity_parameters:crate::LivingWorldOpacityParameters::try_read(&model).map_err(|e|e.to_string())?,
+        opacity_settings:cvars.try_living_world_opacity_settings().map_err(|e|e.to_string())?,
+        position:placement.position})
+}
+
 pub(crate) fn pedestrian_visuals(world:&PhysicalAssemblyWorld,
     actor:&crate::actor_construction::ActorConstruction,
     vault:&Arc<crate::attribute_runtime::AttributeRuntimeVault>,
@@ -373,26 +421,7 @@ pub(crate) fn pedestrian_visuals(world:&PhysicalAssemblyWorld,
         }
         let (irradiance,distances)=match lighting {
             Some(values)=>values,
-            None=>{
-                // BindConstants8280b5d0 copies the same SHLightingMan default
-                // probe as cPresVehicle; no spatial interpolation is performed.
-                let irradiance=crate::selected_living_world_vehicle_visual::vehicle_default_irradiance(vault)
-                    .map_err(|e|e.to_string())?;
-                let rendering=vault.instance(skate2_formats::attrib::string_hash64("rendering"),
-                    0x5141_6546_b54f_421d);
-                // Update82811bd8 fetches element0 live. Null lookup uses
-                // DefaultDataArea(4), rather than a made-up LOD distance.
-                // This is an ARRAY of float, not a scalar node. Base Update
-                // fetches element0; GetLODDistances fetches/squares allthree.
-                let mut distances=[0.;3];
-                for (index,value) in distances.iter_mut().enumerate(){
-                    if let Some(data)=rendering.try_plain_array_data(0xf412_fc7b_191f_16c8,index as u32,
-                        0xe222_28fb_b3c2_09d8,4).map_err(|e|e.to_string())? {
-                        *value=f32::from_be_bytes(data.bytes().try_into().map_err(|_|"pedestrian LOD float width")?);
-                    }
-                }
-                lighting=Some((irradiance,distances));(irradiance,distances)
-            }
+            None=>{let values=living_world_lighting(vault)?;lighting=Some(values);values}
         };
         let velocity=match center_velocity {
             Some(value)=>value,

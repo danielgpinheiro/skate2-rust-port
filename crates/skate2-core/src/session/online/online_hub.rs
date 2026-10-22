@@ -14,7 +14,7 @@ use crate::ui::online_hub::{Action, Controller, HUB_SOUND, HubKind, Lobby, Popup
 use crate::ui::online_match::{self, CustomMatch, FreeskateMatch};
 use crate::ui::pause_menu::PauseMenuInput;
 use crate::ui::profile_name::Prompt;
-use skate2_net::protocol::{ClientMessage, PlayNowMode, challenge};
+use skate2_net::protocol::{ClientMessage, Phase, PlayNowMode, challenge};
 use std::sync::Arc;
 
 /// The hub as the session holds it.
@@ -53,8 +53,8 @@ impl<T, C> SelectedLiveSession<T, C> {
             private: game.attributes.private,
             free_skate_type: game.attributes.challenge_type == challenge::ONLINE_FREE_SKATE,
             lobby_mode: !in_round,
-            challenge_in_progress: in_round,
-            game_in_progress: in_round,
+            // A member waiting in the pre-game lobby plays no round while the game's challenge runs.
+            challenge_in_progress: in_round || game.phase != Phase::LobbySkate,
             changing_location: self.online.changing_location.is_some(),
             players: game.players.iter().filter(|player| player.user_id != local).map(|player| (player.user_id, player.name.clone())).collect(),
             participants: game.players.len(),

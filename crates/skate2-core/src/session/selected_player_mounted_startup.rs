@@ -253,6 +253,7 @@ impl SelectedPlayerStartup {
                     &mounts,
                 )
                 .map_err(E::LivingWorldRecipes)?;
+            recipes.crowd.attach_pause(Arc::clone(&self.owners.pause));
         }
         self.owners
             .animation

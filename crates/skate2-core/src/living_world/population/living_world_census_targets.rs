@@ -182,6 +182,45 @@ pub(crate) fn discrete_choice(probabilities: &[f32], random_word: u32) -> Option
     }
     None
 }
+/// `Math::DiscreteRandom<xvector<VecFloat,32>>` 0x82d1e7d8: the same 1..100 draw against the
+/// running sum times 100, taken where that is at least the draw (`vcmpgefp`: NaN passes on).
+pub(crate) fn vector_discrete_choice(probabilities: &[f32], random_word: u32) -> Option<usize> {
+    let draw = (random_word % 100 + 1) as f32;
+    let mut cumulative = 0.;
+    for (index, probability) in probabilities.iter().enumerate() {
+        cumulative += probability;
+        if cumulative * 100. >= draw {
+            return Some(index);
+        }
+    }
+    None
+}
+/// `CensusUtils::ResolveCategoryGroupToEntity` 0x82e60238: a member category of the group
+/// (`ped_class_business` for a group without members) by weight (`rw::math::Random`, the first
+/// without a pick), then one of its entities (`LW::GetRandom(random, 0, count)` of the Manager's
+/// RNG), `business_male01` for a category without one.
+pub(crate) fn resolve_category_group_to_entity(group_key:u64,vault:&Arc<AttributeRuntimeVault>,
+    random:&mut crate::native_skater_random::NativeSkaterRandom)->Result<u64,String>{
+    use skate2_formats::attrib::string_hash64 as hash;
+    let mut group=vault.instance(GROUPS_CLASS,group_key);
+    if group.try_length(MEMBERS).map_err(|e|e.to_string())?==0{
+        group=vault.instance(GROUPS_CLASS,hash("ped_class_business"));
+    }
+    let count=group.try_length(MEMBERS).map_err(|e|e.to_string())?;
+    let members=group.try_reference_members(MEMBERS,true).map_err(|e|e.to_string())?;
+    let member=|index:u32|members.as_ref().and_then(|members|members.get(index));
+    let weights:Vec<f32>=(0..count).map(|index|member(index).map_or(0.,|data|f32::from_bits(read_u32(data,24)))).collect();
+    let word=crate::native_skater_random::rw_math::global_next().map_err(|e|format!("category group RNG: {e:?}"))?;
+    let index=vector_discrete_choice(&weights,word).unwrap_or(0) as u32;
+    let category=vault.instance(CATEGORIES_CLASS,member(index).map_or(0,|data|read_u64(data,8)));
+    let entities=category.try_reference_members(MEMBERS,false).map_err(|e|e.to_string())?;
+    let length=category.try_length(MEMBERS).map_err(|e|e.to_string())?;
+    if length==0{return Ok(hash("business_male01"));}
+    #[expect(clippy::cast_precision_loss,clippy::cast_possible_truncation,reason="LW::GetRandom's int range")]
+    let pick=random.try_living_world_range(&crate::native_skater_random::NativeRandomGate::production_shared(),0.,length as f32)
+        .map_err(|e|format!("category entity RNG: {e:?}"))? as i32;
+    Ok(u32::try_from(pick).ok().and_then(|pick|entities.as_ref()?.get(pick)).map_or(0,|data|read_u64(data,8)))
+}
 ///Math.ScaledDiscreteRandom82704940: separate rounded multiplies, then
 ///scalar ble (!GT) threshold. Caller consumes global RNG even for empty input.
 pub(crate) fn scaled_discrete_choice(probabilities:&[f32],total:f32,random_word:u32)->Option<usize>{

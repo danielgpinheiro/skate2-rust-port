@@ -15,6 +15,7 @@ pub(crate) fn resolve() -> Result<Option<PathBuf>, String> {
         return Ok(Some(PathBuf::from(root)));
     }
     let mut config = GameConfig::load();
+    let first = config.game_root.is_empty();
     let mut notice = if config.game_root.is_empty() {
         (MessageLevel::Info, "Welcome! Locate your copy of Skate 2: select its .xex file (for example default.xex). The folder it is in has to hold the game's data folder.".to_owned())
     } else {
@@ -37,6 +38,10 @@ pub(crate) fn resolve() -> Result<Option<PathBuf>, String> {
         match check_xex(&xex).and_then(|()| check_root(&root)) {
             Ok(()) => {
                 config.game_root = root.to_str().ok_or("the game folder's path is not valid Unicode")?.to_owned();
+                // A first launch has no update to tell of: this release's changes count as seen.
+                if first && config.changelog_seen.is_empty() {
+                    config.changelog_seen = env!("CARGO_PKG_VERSION").to_owned();
+                }
                 config.save().map_err(|error| format!("config.json could not be saved: {error}"))?;
                 return Ok(Some(root));
             }

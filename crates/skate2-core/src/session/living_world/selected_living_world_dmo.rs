@@ -954,6 +954,19 @@ impl SelectedLivingWorldDmo {
                 .reset_collision_flags();
             // Manager.Update1: ModelMan.Update82728204 follows collision reset.
             living.dmo_models.update();
+        }
+        // Manager.Update1: WaypointMan.Update82ce8e00 between ModelMan and RAIN.
+        if let Some(recipes) = recipes.as_deref() {
+            recipes
+                .update_spectators(world, cvars, ground, simulation_random.as_deref_mut())
+                .map_err(SelectedLivingWorldDmoError::Pedestrians)?;
+        }
+        {
+            let mut living = world
+                .grind_services
+                .living_world()
+                .lock()
+                .map_err(|_| SelectedLivingWorldDmoError::LivingWorldLock)?;
             // Manager.Update1: RAIN after ModelMan, before census update.
             let rain = living
                 .rain

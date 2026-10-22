@@ -221,6 +221,12 @@ impl FaceDatabase {
         })))
     }
 
+    /// `DataBase::GetClipByName`: the clip's record.
+    pub(crate) fn clip_record(&self, name: FastString36) -> Option<usize> {
+        self.parsed.as_ref()?;
+        self.records_by_kind.get(&2).and_then(|map| map.get(&name)).copied()
+    }
+
     pub(crate) fn clip_index(&self, name: FastString36) -> Result<usize, ActorFaceError> {
         self.parsed.as_ref().ok_or(ActorFaceError::MissingClip)?;
         let record = self

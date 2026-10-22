@@ -105,6 +105,18 @@ impl crate::challenge::host::Host for CareerHost {
         Some((crate::world::compose_collision_affine(transform, volume.transform),
             volume.shape_words.map(f32::from_bits)))
     }
+    fn crowd_volume(&self, volume_id: f32) -> Option<Option<([f32; 16], [f32; 4])>> {
+        let triggers = self.triggers.lock().ok()?;
+        let record = triggers.try_find_volume_id(volume_id).ok()??;
+        let Some((volume, transform)) = record.trigger_bounding_volume().ok()? else { return Some(None) };
+        let dimensions = if volume.volume_type() == Some(skate2_formats::collision::VolumeType::Box) {
+            let [x, y, z] = volume.shape_words.map(f32::from_bits);
+            [x, y, z, 0.0]
+        } else {
+            [volume.radius, volume.radius, volume.radius, 0.0]
+        };
+        Some(Some((crate::world::compose_collision_affine(transform, volume.transform), dimensions)))
+    }
     fn location_orientation(&self, location: u32) -> Option<[f32; 16]> {
         self.locations.lock().ok()?.orientation(location)
     }
@@ -639,7 +651,8 @@ pub(crate) struct CareerSession {
     unlock_ready: bool,
     skate101_ready: bool,
     hom_results_ready:bool,
-    hom_destination:Option<u8>,
+    /// The results' Replay Editor asked for `PushState(12)`.
+    hom_replay_editor:bool,
     annals_ready:bool,
     /// FE state 11's screen is ready.
     sponsor_ready: bool,
@@ -780,7 +793,7 @@ impl CareerSession {
             unlock_ready: false,
             skate101_ready: false,
             hom_results_ready:false,
-            hom_destination:None,annals_ready:false,
+            hom_replay_editor:false,annals_ready:false,
             sponsor_ready: false,
             sponsor_selected: 0,
             sponsor_outro_pending: false,
@@ -2911,6 +2924,7 @@ impl<T, C> SelectedLiveSession<T, C> {
         let mut online_outputs = Vec::new();
         let mut end_points = Vec::new();
         let mut start_teleports = Vec::new();
+        let mut crowd_updates = 0;
         let mut markers = Vec::new();
         let mut marker_teleports = 0;
         let mut autosave = false;
@@ -3088,6 +3102,12 @@ impl<T, C> SelectedLiveSession<T, C> {
                 Output::UnloadPreloadedNis => career.nis.unload_any_preloaded_niss(),
                 Output::TriggerMissionMusic { trigger, challenge } => {
                     if let Some(audio) = career.audio.as_ref() {
+                        // TriggerMissionMusic (0x82504f28) caches the spectator groups at a countdown.
+                        if trigger == 0 {
+                            let actor = self.inner.player.as_ref().and_then(|player| player.selected.actor.as_deref());
+                            let pods = self.inner.world.as_ref().zip(actor).map(|(owner, actor)| super::crowd_pod_infos(&owner.world, actor)).unwrap_or_default();
+                            audio.cache_crowd_pod_infos(&pods);
+                        }
                         let (challenge_type, race_tuning) = crate::challenge::audio_handlers::mission_music(career.system.world(), challenge);
                         audio.trigger_mission_music(trigger, challenge, challenge_type, race_tuning);
                     }
@@ -3102,10 +3122,17 @@ impl<T, C> SelectedLiveSession<T, C> {
                         audio.restart_challenge(retry);
                     }
                 }
-                // AudioSystem::PlayMissionSFXImp 0x824fecb8, ContestPointsEarnedHandler 0x824f26a0,
-                // OneUpSuccessHandler 0x824ffc10, OneUpFailureHandler 0x82500008,
-                // StartThrowdownChallengeHandler 0x824e7dc0, StartTurnHandler 0x824ff828: mission
-                // audio is not ported.
+                // AudioSystem::PlayMissionSFX (0x82504e70): GetGlobalDataFromChallenge of no challenge
+                // reads the default ChallengeType.
+                Output::MissionAudio(crate::challenge::mission_audio::MissionAudio::Sfx { sfx, challenge }) => {
+                    if let Some(audio) = career.audio.as_ref() {
+                        let (challenge_type, race_tuning) = if challenge == 0 { (0, 0) } else { crate::challenge::audio_handlers::mission_music(career.system.world(), challenge) };
+                        audio.play_mission_sfx(sfx, challenge, challenge_type, race_tuning);
+                    }
+                }
+                // ContestPointsEarnedHandler 0x824f26a0, OneUpSuccessHandler 0x824ffc10,
+                // OneUpFailureHandler 0x82500008, StartThrowdownChallengeHandler 0x824e7dc0,
+                // StartTurnHandler 0x824ff828: these mission speech handlers are not ported.
                 Output::MissionAudio(crate::challenge::mission_audio::MissionAudio::LeaderboardOverall { character }) => {
                     if let Some(audio) = career.audio.as_ref() {
                         audio.leaderboard_overall(character);
@@ -3186,6 +3213,8 @@ impl<T, C> SelectedLiveSession<T, C> {
                     online_outputs.push(output);
                 }
                 Output::Ai(request) => ai_requests.push(request),
+                // Presentation::ReceiveCrowdBufferChanged (0x827eefa8) runs CrowdPresentation::Update.
+                Output::CrowdBufferChanged => crowd_updates += 1,
                 Output::Unpresented { message, kind } => eprintln!("career: unpresented {kind} {message}"),
                 other => eprintln!("career: {other:?}"),
             }
@@ -3213,6 +3242,11 @@ impl<T, C> SelectedLiveSession<T, C> {
         }
         for challenge in start_teleports {
             self.teleport_local_player_start_challenge(challenge)?;
+        }
+        for _ in 0..crowd_updates {
+            if let Err(failure) = self.update_career_crowd_presentation() {
+                eprintln!("career: crowd presentation: {failure}");
+            }
         }
         for _ in 0..marker_teleports {
             self.teleport_local_player_to_session_marker()?;
@@ -4038,7 +4072,10 @@ impl CareerSession {
                 self.hud.hom_results=None;self.pausing.pop();self.system.post(Event::HudContinue);
                 crate::challenge::hom_results::continue_results(self.system.world_mut());
             } else if view.selection==1 {self.open_hom_annals();}
-            else {self.hom_destination=Some(2);}
+            else {
+                // PushState(12) leaves the results (OnLeave826486c0 closes screen 46).
+                self.hud.hom_results=None;self.hom_results_ready=false;self.hom_replay_editor=true;
+            }
         }
     }
 }
@@ -4049,6 +4086,11 @@ impl<T,C> SelectedLiveSession<T,C> {
 }
 
 impl CareerSession {
+    pub(super) fn take_hom_replay_editor(&mut self)->bool {std::mem::take(&mut self.hom_replay_editor)}
+    /// The Replay Editor pops back to the results: OnEnter82642348 opens screen 46 anew.
+    pub(super) fn reenter_hom_results(&mut self) {
+        if self.pausing.last()==Some(&PausingState::HomResults) {self.system.world_mut().output(Output::OpenHomResults);}
+    }
     pub(super) fn open_hom_annals(&mut self) {
         // PushState82d69cf0 does not keep the previous screen; pop re-enters it.
         match self.pausing.last() {

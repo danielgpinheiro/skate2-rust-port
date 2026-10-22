@@ -83,7 +83,11 @@ fn get_frame(r:&mut Reader<'_>,c:&mut Loaded)->Result<ReplayFrame> {
     for _ in 0..count {
         let rig=Arc::clone(c.catalog.rigs.get(usize::get(r)?).ok_or("replay rig reference")?);
         let index=usize::get(r)?;
-        let palette=Arc::clone(c.catalog.palettes.get(index).ok_or("replay palette reference")?);
+        let mut palette=Arc::clone(c.catalog.palettes.get(index).ok_or("replay palette reference")?);
+        if !palette.has_deck_bone() {
+            let mut recorded=(*palette).clone();recorded.set_deck_bone(rig.board);
+            palette=Arc::new(recorded);c.catalog.palettes[index]=Arc::clone(&palette);
+        }
         let header:[u8;208]=Store::get(r)?;let pose:Vec<skate2_formats::andale::AndaleSqt>=Store::get(r)?;
         if pose.len()!=rig.bind.len() {return Err("replay skater pose length".into());}
         let twist_ratios=Store::get(r)?;

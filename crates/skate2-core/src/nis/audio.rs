@@ -53,6 +53,12 @@ pub trait AudioInterface: Send + Sync {
     /// `eSk8MissionMusicTrigger` for the challenge, with what `TriggerMissionMusicImp` 0x824fee80
     /// reads of it: its `ChallengeType` and its `AudioRaceTuning` collection.
     fn trigger_mission_music(&self, trigger: i32, challenge: u64, challenge_type: i32, race_tuning: u64);
+    /// `PlayMissionSFX` 0x82504e70 (+0x38, `ChallengeAudioManager::PlayMissionSFX`) of the
+    /// `eSk8MissionSFX` for the challenge, with its `ChallengeType` and `AudioRaceTuning`.
+    fn play_mission_sfx(&self, _sfx: i32, _challenge: u64, _challenge_type: i32, _race_tuning: u64) {}
+    /// `CacheCrowdPodInfos` 0x824fd6c0 at a countdown (`TriggerMissionMusic` 0x82504f28): the
+    /// spectator groups found around the local skater, as centroid and spectators.
+    fn cache_crowd_pod_infos(&self, _pods: &[([f32; 4], i32)]) {}
     /// `RestartChallenge` 0x824ff320 (+0x84, `ChallengeAudioManager::RestartChallenge` 0x82da1c48).
     fn restart_challenge(&self, retry: bool);
     /// `QuitChallenge` 0x824ff478, the audio system's `cMsgAbandonChallenge` handler on the

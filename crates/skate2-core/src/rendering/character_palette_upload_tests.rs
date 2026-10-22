@@ -54,7 +54,35 @@ fn publication() -> CharacterPalette {
         generation: 0,
         published: false,
         transforms_complete: true,
+        deck_bone: None,
+        deck_matrix: None,
+        deck_world: None,
     }
+}
+#[test]
+fn the_deck_frame_is_the_bone_pose_placed_by_the_local_to_world() {
+    let mut palette = publication();
+    let mut inverse_bind = identity();
+    inverse_bind[13] = -0.1;
+    palette.skinning.hierarchy_inverse_bind_pose = Arc::from([inverse_bind]);
+    palette.deck_bone = Some(0);
+    let mut skin = identity();
+    skin[12] = 2.0;
+    skin[13] = -0.1;
+    palette.deck_matrix = Some(skin);
+    assert_eq!(palette.deck_world(), None);
+    let mut world = identity();
+    world[12] = 10.0;
+    palette.pack_for_upload(world).unwrap();
+    let deck = palette.deck_world().expect("published deck");
+    assert_eq!(&deck[12..15], &[12.0, 0.0, 0.0]);
+    assert_eq!(&deck[..12], &identity()[..12]);
+}
+#[test]
+fn the_deck_bone_is_the_hierarchy_skateboard_root() {
+    let hierarchy = |names: &[&str]| CharacterHierarchy { bone_names: names.iter().map(|&name| name.into()).collect() };
+    assert_eq!(skateboard_bone(&hierarchy(&["trajectory", "Hips", "Skateboard_Root"])), Some(2));
+    assert_eq!(skateboard_bone(&hierarchy(&["trajectory", "Hips"])), None);
 }
 #[test]
 fn mesh_rows_share_completed_publication_and_cannot_repack_stale_matrices() {

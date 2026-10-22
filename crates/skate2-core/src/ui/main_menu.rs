@@ -288,6 +288,9 @@ pub struct Controller {
     /// until the server refuses this version.
     pub update_prompt: Option<super::update_prompt::UpdatePrompt>,
     pub update_declined: Option<String>,
+    /// PC: the release's changes, shown once the menu stands idle at the first start after an
+    /// update.
+    pub changelog: Option<super::update_prompt::Changelog>,
     /// `FE_SOUND_*` globals the menu_picker's script played for this input.
     sounds: Vec<&'static str>,
 }
@@ -314,6 +317,7 @@ impl Controller {
             dlc_notice: false,
             update_prompt: None,
             update_declined: None,
+            changelog: None,
             sounds: Vec::new(),
         }
     }
@@ -338,7 +342,9 @@ impl Controller {
         use super::update_prompt::{UpdatePrompt, UpdateStatus};
         let updating = matches!(self.update_prompt, Some(UpdatePrompt::Downloading { .. }));
         match status {
-            UpdateStatus::Available { version } if self.update_prompt.is_none() && self.idle() && self.update_declined.as_ref() != Some(version) => {
+            UpdateStatus::Available { version }
+                if self.update_prompt.is_none() && self.idle() && self.changelog.is_none() && self.update_declined.as_ref() != Some(version) =>
+            {
                 self.update_prompt = Some(UpdatePrompt::Offer { version: version.clone(), current: current.to_owned(), selected: 0 });
                 self.sounds.push("FE_SOUND_CORE_POPUP");
             }
@@ -434,6 +440,16 @@ impl Controller {
             if input.select { prompt.input(super::extras::TextInput::Accept); }
             return prompt.take_accepted().map_or(Selection::None, Selection::SaveProfileName);
         }
+        // PC: the release's changes, once, when the menu first stands idle after an update; the
+        // input of that frame reaches nothing.
+        if self.update_prompt.is_none()
+            && self.idle()
+            && let Some(changelog) = self.changelog.take()
+        {
+            self.update_prompt = Some(super::update_prompt::UpdatePrompt::Changelog(changelog));
+            self.sounds.push("FE_SOUND_CORE_POPUP");
+            return Selection::None;
+        }
         if let Some(prompt) = self.update_prompt.as_mut() {
             use super::update_prompt::UpdatePrompt;
             if !focused { return Selection::None; }
@@ -455,11 +471,11 @@ impl Controller {
                         self.update_prompt = None;
                     }
                 }
-                UpdatePrompt::Failed { .. } if input.select => {
+                UpdatePrompt::Failed { .. } | UpdatePrompt::Changelog(_) if input.select => {
                     self.sounds.push("FE_SOUND_CORE_A_BUTTON");
                     self.update_prompt = None;
                 }
-                UpdatePrompt::Failed { .. } | UpdatePrompt::Downloading { .. } | UpdatePrompt::Installed { .. } => {}
+                UpdatePrompt::Failed { .. } | UpdatePrompt::Downloading { .. } | UpdatePrompt::Installed { .. } | UpdatePrompt::Changelog(_) => {}
             }
             return Selection::None;
         }
@@ -678,6 +694,33 @@ mod tests {
         assert_eq!(press(&mut menu, select()), Selection::InstallUpdate, "offered again after the failure");
         menu.set_update_status(&UpdateStatus::Installed { version: "0.2.0".into() }, "0.1.0");
         assert_eq!(menu.update_prompt, Some(UpdatePrompt::Installed { version: "0.2.0".into() }));
+    }
+
+    #[test]
+    fn the_changelog_shows_once_on_the_idle_main_menu_before_an_update_is_offered() {
+        use crate::ui::update_prompt::{Changelog, UpdatePrompt, UpdateStatus};
+        let changelog = Changelog::parse("0.2.5", "Leave Challenge\n- Lobby ghosts\n");
+        let available = UpdateStatus::Available { version: "0.2.6".into() };
+        let mut menu = settled_menu();
+        menu.changelog = Some(changelog.clone());
+        menu.name_prompt = Some(Default::default());
+        assert_eq!(press(&mut menu, down()), Selection::None);
+        assert_eq!(menu.update_prompt, None, "not over the name prompt");
+        menu.name_prompt = None;
+        menu.set_update_status(&available, "0.2.5");
+        assert_eq!(menu.update_prompt, None, "an offer waits for the changelog");
+        let _ = menu.take_sounds();
+        assert_eq!(press(&mut menu, down()), Selection::None);
+        assert_eq!(menu.update_prompt, Some(UpdatePrompt::Changelog(changelog)));
+        assert_eq!((menu.selected, menu.take_sounds()), (0, vec!["FE_SOUND_CORE_POPUP"]), "the opening frame's input reaches nothing");
+        for input in [up(), down(), cancel()] {
+            assert_eq!(press(&mut menu, input), Selection::None);
+        }
+        assert!(matches!(menu.update_prompt, Some(UpdatePrompt::Changelog(_))), "only A closes it");
+        assert_eq!(press(&mut menu, select()), Selection::None);
+        assert_eq!((menu.update_prompt.clone(), menu.changelog.clone()), (None, None), "shown once");
+        menu.set_update_status(&available, "0.2.5");
+        assert!(matches!(menu.update_prompt, Some(UpdatePrompt::Offer { .. })), "then a newer release is offered");
     }
 
     #[test]

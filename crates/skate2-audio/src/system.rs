@@ -42,9 +42,9 @@ use crate::world::traffic::TrafficManager;
 use crate::world::pedestrian::PedestrianManager;
 use crate::world::emitter::EmitterManager;
 use crate::world::emitter_system::{self, EmitterFiles, EmitterIo, Sk8EmitterSystem};
-use crate::world::crowd::CrowdManager;
+use crate::world::crowd::{CrowdEnv, CrowdManager, CrowdPodInfo};
 use crate::world::dynamic_object::DynamicObjectManager;
-use crate::world::speaker::SpeakerManager;
+use crate::world::speaker::{SpeakerManager, SPEAKER_MUSIC};
 use crate::world::whoosh::WhooshManager;
 use crate::world::object_instance::ObjectInstanceManager;
 use crate::world::nis_character::NisCharacterManager;
@@ -52,6 +52,10 @@ use crate::speech::{self, GameValues, NisSpeechObject, Sk8SpeechSystem, SpeakerO
 use crate::music::{self, MusicIo, MusicSystem};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+
+#[path = "system_contest.rs"]
+mod contest;
+pub use contest::{mission_sfx, module_status};
 
 /// `SPLICE_TYPE_FE`: `Sk82_FE.bnk`.
 pub const SPLICE_FE: usize = 25;
@@ -353,6 +357,8 @@ enum AudioMessage {
     PlayCameraManCsisEvent { function: &'static str },
     /// `cMsgTriggerMissionMusic`.
     TriggerMissionMusic { trigger: i32, music: MissionMusic },
+    /// `cMsgPlayMissionSFX`.
+    PlayMissionSfx { sfx: i32, mission: MissionMusic },
 }
 
 /// `SFXObj_Master`'s fields.
@@ -532,6 +538,32 @@ pub struct AudioSystem {
     /// `mpUtility`, the `C_foley_utility` `LoadFoleyData` 0x824f0bf0 creates after the foley banks:
     /// its module deals the cloth foley variations.
     utility: Option<ClassObject>,
+    /// `mbInOwnTheSpot` (+0x528), which `PlayMissionSFXImp`'s Own the Spot sets and nothing
+    /// clears.
+    in_own_the_spot: bool,
+    /// `mContestId` (+0x620) with its challenge type: the loaded contest, 0 without one.
+    contest_id: u64,
+    contest_type: i32,
+    /// `mContestKey` (+0x98): the challenge whose crowd banks load.
+    contest_key: u64,
+    /// `mCrowdsLoadStatus` (+0x8C) and `mVehiclesLoadStatus` (+0x90) (`eModuleLoadStatus`).
+    crowds_load: i32,
+    vehicles_load: i32,
+    /// `mCrowdBanksLoaded` (+0x7A5), by `eCrowdSFX` size.
+    crowd_banks_loaded: [bool; 9],
+    /// `mbPlayArenaOnLoad` (+0x628).
+    play_arena_on_load: bool,
+    /// `mpCrowdPodInfos` (+0xA0): the spectator groups the last countdown found.
+    crowd_pod_infos: [CrowdPodInfo; 30],
+    /// `mCurrentEmitterState` (+0x630, `eEmitterStates`), `mbEmittersSetUp` (+0x634) and
+    /// `mbNISEmittersSetUp` (+0x635).
+    current_emitter_state: u32,
+    emitters_set_up: bool,
+    nis_emitters_set_up: bool,
+    /// `mCondScore` (+0x55C) and `mCondPrevScore` (+0x560): the local skater's announcer score
+    /// and the one before it, which `UpdatePresentationData` keeps.
+    cond_score: i32,
+    cond_prev_score: i32,
 }
 
 /// The Csis interfaces (`LoadCsisEventSystem` order) and AEMS banks (`AudioAssetManager` load
@@ -542,6 +574,10 @@ pub struct AemsFiles {
     pub banks: Vec<(String, Arc<[u8]>)>,
     /// The emitter data files and `emitters.big`'s banks (`Sk8EmitterSystem::LoadGameFiles`).
     pub emitters: EmitterFiles,
+    /// The banks `AudioAssetManager::AsyncLoadAt` loads by name: the traffic banks of
+    /// `vehicle.big` and `emitters2.big`'s `car_alarms.abk` (`LoadVehiclesData`), and the crowd
+    /// banks of `crowds.big` (`LoadCrowdsData`).
+    pub asset_files: Vec<(String, Arc<[u8]>)>,
 }
 
 impl AudioSystem {
@@ -634,6 +670,20 @@ impl AudioSystem {
             hom: Hom::new(None),
             menu_io: None,
             jitter: Jitter::new(None),
+            in_own_the_spot: false,
+            contest_id: 0,
+            contest_type: 0,
+            contest_key: 0,
+            crowds_load: module_status::NO_HEADER,
+            vehicles_load: module_status::NO_HEADER,
+            crowd_banks_loaded: [false; 9],
+            play_arena_on_load: false,
+            crowd_pod_infos: [CrowdPodInfo::default(); 30],
+            current_emitter_state: 0,
+            emitters_set_up: false,
+            nis_emitters_set_up: false,
+            cond_score: 0,
+            cond_prev_score: 0,
             world: None,
             cvars: Cvars::default(),
             times: [false; 3],
@@ -699,6 +749,10 @@ impl AudioSystem {
                 return Err(format!("{name}: not a Csis interface"));
             }
         }
+        // `LoadBigFileHeaders` 0x824e6740: the traffic and crowd banks can load.
+        self.emitter_system.assets_mut().add_files(aems_files.asset_files.into_iter().map(|(name, bytes)| (name.to_lowercase(), bytes)));
+        self.vehicles_load = module_status::EMPTY;
+        self.crowds_load = module_status::EMPTY;
         let mut emitter_files = Some(aems_files.emitters);
         for (name, bytes) in aems_files.banks {
             self.aems.add_module_bank(&mut self.core, &name, bytes).ok_or_else(|| format!("{name}: not an AEMS bank"))?;
@@ -729,6 +783,8 @@ impl AudioSystem {
             self.splicer.load_bank(bytes, slot).map_err(|e| format!("{name}: {e:?}"))?;
         }
         self.speech.load_early_resident_data();
+        // `SecondaryLoad` 0x824fe178: the traffic banks load on the next update.
+        self.load_vehicles_data(true);
         self.in_game_data_loaded = true;
         self.initialize_mixer(mix_map);
         self.music.find_main_menu_play_list(&self.vault);
@@ -915,6 +971,7 @@ impl AudioSystem {
     /// none to set up without one.
     pub fn notify_nis_playback_start(&mut self, scene_type: i32, special_flags: i32, is_replay_nis: bool, scene_length: f32) {
         self.current_scene = SceneInfo { scene_type, special_flags, is_replay_nis, scene_length };
+        self.check_for_round_start(self.current_scene);
     }
 
     /// `NotifyNISPlaybackFinish` 0x824fe558 (+0x78, `Scene::Purge`): the music resumes
@@ -947,38 +1004,10 @@ impl AudioSystem {
 
     /// `TriggerMissionMusic` 0x82504f28 (+0x34, `ChallengeAudioManager::PlayMusic`): posts
     /// `cMsgTriggerMissionMusic`, which the next update's group A hands `TriggerMissionMusicImp`
-    /// (`TriggerMissionMusicMsg` 0x82504fb8). Its countdown's `CacheCrowdPodInfos` belongs to the
-    /// crowds, which are not ported.
+    /// (`TriggerMissionMusicMsg` 0x82504fb8). Its countdown's `CacheCrowdPodInfos` is the host's
+    /// (`cache_crowd_pod_infos`).
     pub fn trigger_mission_music(&mut self, trigger: i32, music: MissionMusic) {
         self.messages.push_back(AudioMessage::TriggerMissionMusic { trigger, music });
-    }
-
-    /// `TriggerMissionMusicImp` 0x824fee80: Demos, Best Tricks, Mega Ramps, Street Skating and
-    /// `m_3a_03_besttrick_danny` play the contest music (`MusicSystem::ChallengeTrigger` with the
-    /// challenge's `MusicPlaylist`, the countdown also starting the crowds and moving the
-    /// emitters' contest state), which is not ported with the contests' speakers and crowds;
-    /// Point-to-Point, Death and Spot races hand the trigger as an `eChallengeTrigger` to
-    /// `RaceTrigger`.
-    fn trigger_mission_music_imp(&mut self, trigger: i32, mission: MissionMusic) {
-        use music::challenge_trigger as challenge;
-        if !matches!(mission.challenge_type, 0x12..=0x14) {
-            return;
-        }
-        let trigger = match trigger {
-            0 => challenge::COUNTDOWN,
-            2 => challenge::HALFWAY,
-            3 => challenge::THREE_QUARTERS,
-            4 => challenge::STRAIGHT_AWAY,
-            5 => challenge::ABORT,
-            6 => challenge::END_ROUND,
-            7 => challenge::OVER,
-            8 => challenge::WIN,
-            9 => challenge::LOSE,
-            10 => challenge::JUMP_SHORT,
-            11 => challenge::MAX,
-            _ => challenge::START,
-        };
-        self.music.race_trigger(trigger, mission.challenge, mission.race_tuning);
     }
 
     /// `QuitChallenge` 0x824ff478, the `cMsgAbandonChallenge` handler `AddDelayedMessageHandlers`
@@ -988,11 +1017,12 @@ impl AudioSystem {
     }
 
     /// `RestartChallenge` 0x824ff320 (+0x84, `ChallengeAudioManager::RestartChallenge`
-    /// 0x82da1c48): a loaded contest (`mContestId`, which `PlayMissionSFXImp`'s `ContestLoad` sets
-    /// and the port does not) resets the emitters' contest state; otherwise a Point-to-Point, Death
-    /// or Spot race (`mChallengeType`) restarts its music.
+    /// 0x82da1c48): a loaded contest (`mContestId`) resets the emitters' contest state;
+    /// otherwise a Point-to-Point, Death or Spot race (`mChallengeType`) restarts its music.
     pub fn restart_challenge(&mut self, _retry: bool) {
-        if matches!(self.state.challenge_type, 0x12..=0x14) {
+        if self.contest_id != 0 {
+            self.restart_contest();
+        } else if matches!(self.state.challenge_type, 0x12..=0x14) {
             self.music.restart_race();
         }
     }
@@ -1606,7 +1636,15 @@ impl AudioSystem {
     /// anything to update.
     fn world_update_params(&mut self, t: f32) {
         let loading = self.is_loading();
-        let Self { core, splicer, mixer, master_sub_mix, global_effects, vault, rng, microphones, players, collisions, collision_requests, cvars, world, aems, state, times, environment, traffic, pedestrians, emitters, crowds, dynamic_objects, speakers, whooshes, object_instances, nis_characters, speech, .. } = self;
+        let crowd_start = self.crowds.as_ref().and_then(CrowdManager::pending_start);
+        let crowd_start = crowd_start.map(|(kind, challenge)| (kind, challenge, self.crowds_load_status() >= module_status::LOADED, self.local_skater_position()));
+        let in_own_the_spot = self.in_own_the_spot || self.state.in_own_the_spot;
+        let cond_score_delta = self.cond_score - self.cond_prev_score;
+        let Self { core, splicer, mixer, master_sub_mix, music_master_sub_mix, global_effects, vault, rng, microphones, players, collisions, collision_requests, cvars, world, aems, state, times, environment, traffic, pedestrians, emitters, emitter_system, crowds, crowd_pod_infos, crowd_banks_loaded, dynamic_objects, speakers, whooshes, object_instances, nis_characters, speech, .. } = self;
+        let crowd_env = match world.as_ref() {
+            Some(world) => Some(CrowdEnv { skaters: &world.player.skaters, emitter_system: &*emitter_system, pods: &*crowd_pod_infos, banks_loaded: &*crowd_banks_loaded }),
+            None => None,
+        };
         let Some(map) = mixer.map_mut() else { return };
         let (bail, bail_severity) = world.as_ref().map_or((false, 0.0), |world| (world.bail, world.bail_severity));
         let hall_of_meat = self.is_hall_of_meat;
@@ -1629,11 +1667,14 @@ impl AudioSystem {
             out_of_bounds_amount,
             hall_of_meat,
             times: *times,
-            in_own_the_spot: state.in_own_the_spot,
+            in_own_the_spot,
             challenge_type: state.challenge_type,
             camera_position: microphones.microphones[0].cur_position,
             npc_wheel_type: WHEEL_SOFT,
             collisions: collision_requests,
+            crowds: crowds.as_mut(),
+            crowd_env,
+            cond_score_delta,
         };
         if let (Some(players), Some(collisions), Some(world)) = (players.as_mut(), collisions.as_mut(), world.as_ref()) {
             let inputs = PhysicsInputs {
@@ -1659,13 +1700,18 @@ impl AudioSystem {
             traffic.update_params(t, world, microphones, &mut players.shared, whooshes.as_mut(), &mut ctx);
         }
         if let Some(pedestrians) = pedestrians {
-            pedestrians.update_params(t, world, microphones, whooshes.as_mut(), Some(speech), &mut ctx);
+            pedestrians.update_params(t, world, microphones, whooshes.as_mut(), Some(&mut *speech), &mut ctx);
         }
         if let Some(emitters) = emitters {
             emitters.update_params(t, microphones, &mut players.shared, ctx.map);
         }
-        if let Some(crowds) = crowds {
-            crowds.update_params(t, world, microphones, &mut ctx);
+        // `CSTATEMGR_Crowd::UpdateParams` 0x825588d8: a start that waited for the crowd banks,
+        // then the states.
+        if let Some(crowds) = ctx.crowds.take() {
+            if let Some((kind, challenge, loaded, position)) = crowd_start {
+                crowds.start_crowds(kind, challenge, loaded, position, crowd_banks_loaded, &mut ctx);
+            }
+            crowds.update_params(t, microphones, &mut players.shared, &mut ctx);
         }
         if let Some(dynamic_objects) = dynamic_objects {
             dynamic_objects.update_params(t, world, microphones, &mut players.shared, whooshes.as_mut(), &mut ctx);
@@ -1674,7 +1720,7 @@ impl AudioSystem {
             }
         }
         if let Some(speakers) = speakers {
-            speakers.update_params(t, world, microphones, &mut ctx);
+            speakers.update_params(t, emitter_system, microphones, &mut players.shared, speech, *music_master_sub_mix, &mut ctx);
         }
         if let Some(whooshes) = whooshes.as_mut() {
             whooshes.update_params(t, world, microphones, &mut players.shared, &mut ctx);
@@ -1722,6 +1768,11 @@ impl AudioSystem {
         }
         if let Some(world) = &self.world {
             self.times = world.times;
+            // `mCondPrevScore` takes `mCondScore`, which takes the local skater's announcer score.
+            if let Some(local) = world.player.skaters.iter().find(|skater| skater.local) {
+                self.cond_prev_score = self.cond_score;
+                self.cond_score = local.announcer_score as i32;
+            }
         }
         let elapsed = ((t * -1000.0) as i32).wrapping_neg();
         if self.state.presentation.is_some() {
@@ -1748,6 +1799,8 @@ impl AudioSystem {
         if let Some(map) = self.mixer.map() {
             self.camera_man_object = Self::speaker_object(map, self.camera_man_io);
         }
+        let in_own_the_spot = self.in_own_the_spot || self.state.in_own_the_spot;
+        let cond_score_delta = self.cond_score - self.cond_prev_score;
         let Self { core, splicer, mixer, master_sub_mix, global_effects, vault, rng, microphones, players, collisions, collision_requests, cvars, world, aems, state, times, reverb, nis_io, nis_volumes, bloom, environment, traffic, pedestrians, emitters, crowds, dynamic_objects, speakers, whooshes, object_instances, nis_characters, speech, .. } = self;
         let Some(map) = mixer.map_mut() else { return };
         reverb.process_update(core, map, global_effects);
@@ -1774,11 +1827,14 @@ impl AudioSystem {
             out_of_bounds_amount,
             hall_of_meat,
             times: *times,
-            in_own_the_spot: state.in_own_the_spot,
+            in_own_the_spot,
             challenge_type: state.challenge_type,
             camera_position: microphones.microphones[0].cur_position,
             npc_wheel_type: players.as_ref().map_or(WHEEL_SOFT, PlayerManager::npc_wheel_type),
             collisions: collision_requests,
+            crowds: None,
+            crowd_env: None,
+            cond_score_delta,
         };
         if let Some(players) = players {
             players.process_update(&mut ctx);
@@ -1799,13 +1855,13 @@ impl AudioSystem {
             emitters.process_update(&mut ctx);
         }
         if let Some(crowds) = crowds {
-            crowds.process_update(&mut ctx);
+            crowds.process_update(microphones, &mut ctx);
         }
         if let Some(dynamic_objects) = dynamic_objects {
             dynamic_objects.process_update(&mut ctx);
         }
         if let Some(speakers) = speakers {
-            speakers.process_update(&mut ctx);
+            speakers.process_update(state.challenge_large_arena, &mut ctx);
         }
         if let Some(whooshes) = whooshes {
             whooshes.process_update(&mut ctx);
@@ -1862,6 +1918,7 @@ impl AudioSystem {
                         self.with_speech(|speech, ctx| speech.camera_man_csis_event_msg(function, ctx));
                     }
                     AudioMessage::TriggerMissionMusic { trigger, music } => self.trigger_mission_music_imp(trigger, music),
+                    AudioMessage::PlayMissionSfx { sfx, mission } => self.play_mission_sfx_imp(sfx, mission),
                 }
             }
             self.update_music(group_a_time);
@@ -1895,8 +1952,10 @@ impl AudioSystem {
         }
         if group_a {
             self.update_emitter_system(group_a_time);
+            self.update_waiting_loads();
             self.update_presentation_data(group_a_time);
             self.update_fe_hud_splices(group_a_time);
+            self.update_arena_on_load();
             self.update_hom_bank_status();
             if self.next_hom_time > 0.0 {
                 self.next_hom_time -= group_a_time;
@@ -2008,9 +2067,17 @@ impl AudioSystem {
         let local_race_ranking = self.world.as_ref().map_or(-1, |world| world.local_race_ranking);
         let env_send_sub_mix = self.global_effects.reverb_sub_mix();
         let scene_type = self.current_scene.scene_type;
+        let scene_is_replay_nis = self.current_scene.is_replay_nis;
+        let contest = self.loaded_contest();
+        let cond_score_delta = self.cond_score - self.cond_prev_score;
         let chase = self.chase_audio;
         let restored_frame = self.world.as_ref().map_or(0, |world| world.frame);
         let bodyguard = self.world.as_ref().is_some_and(|world| world.bodyguard);
+        let multi_speaker_music = if self.state.online_game {
+            Some(self.music_master_sub_mix)
+        } else {
+            self.speakers.as_ref().and_then(|speakers| speakers.multi_speaker_submix(SPEAKER_MUSIC))
+        };
         let Self { core, vault, rng, music, master_sub_mix, music_master_sub_mix, state, .. } = self;
         let mut io = MusicIo {
             core,
@@ -2021,11 +2088,13 @@ impl AudioSystem {
             master: *master_sub_mix,
             music_master: *music_master_sub_mix,
             env_send_sub_mix,
-            multi_speaker_music: None,
+            multi_speaker_music,
             listener,
             challenge_type: state.challenge_type,
             scene_type,
-            cond_score_delta: 0,
+            scene_is_replay_nis,
+            contest,
+            cond_score_delta,
             local_wiping_out,
             local_board,
             local_race_ranking,

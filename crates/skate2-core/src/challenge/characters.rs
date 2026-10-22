@@ -247,6 +247,27 @@ pub enum LivingWorldOp {
         serial: u32,
         tests: Vec<([f32; 4], [f32; 4], f32)>,
     },
+    /// A crowd generator's batch (`cCrowdPositionAndGenerationState::SubmitLineTests`:
+    /// `AcquireLineBatch("cCrowdPositionAndGenerationState::SubmitLineTests")`, `BF_Default`):
+    /// start, end and fatness per test, added until the batch refuses one. The session answers
+    /// with [`super::crowd::line_tests_answered`] and the serial.
+    CrowdLineTests {
+        serial: u32,
+        tests: Vec<([f32; 4], [f32; 4], f32)>,
+    },
+    /// `LivingWorld.ActivateSpectatorWaypoint`'s `WaypointMan::ActivateSpectatorWaypoint`
+    /// (`0x82ce9180`) of the waypoint group the GUID finds, when it has waypoints: its
+    /// `RequestCensusManagedCull()` (`keep` the challenge characters at the call), then the
+    /// group's forced spectators queued, or the group activated when none are forced.
+    ActivateSpectatorWaypoint {
+        guid: u64,
+        force_spawn_percentage: f32,
+        category_group: u64,
+        keep: Vec<CharacterRef>,
+    },
+    /// `WaypointMan::DeactivateSpectatorWaypoint(group, true)` (`0x82ce8ed8`) of the group the
+    /// GUID finds: its queued activation dropped and its spectators culled.
+    DeactivateSpectatorWaypoint { guid: u64 },
     /// `LWDynamicObjectMan::CanResetDynamicObject`, then `ResetDynamicObject`, of the dynamic
     /// object owning a line test's hit.
     ResetDynamicObject(u32),

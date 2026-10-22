@@ -240,6 +240,22 @@ const VEHICLE_BANKS: [(&str, &str); 11] = [
     ("emitters2.big", "car_alarms.abk"),
 ];
 
+/// The banks `AudioSystem::LoadCrowdsData` 0x824fdcc8 can load from `crowds.big`
+/// (`mpCrowdsBigFileHdr`): every name of `sCrowdNamesThree` to `sCrowdNamesArenaOhhs`.
+const CROWD_BANKS: [(&str, &str); 11] = [
+    ("crowds.big", "crowds_threes_a.abk"),
+    ("crowds.big", "crowds_threes_b.abk"),
+    ("crowds.big", "crowds_fives_a.abk"),
+    ("crowds.big", "crowds_fives_b.abk"),
+    ("crowds.big", "crowds_tens_a.abk"),
+    ("crowds.big", "crowds_tens_b.abk"),
+    ("crowds.big", "crowds_hundreds_a.abk"),
+    ("crowds.big", "crowds_hundreds_b.abk"),
+    ("crowds.big", "arena_ambience.abk"),
+    ("crowds.big", "arena_cheers.abk"),
+    ("crowds.big", "arena_ohhs.abk"),
+];
+
 fn big_file(root: &Path, big: &str, name: &str) -> Result<Vec<u8>, String> {
     let archive = MountedBig::open(root.join("data/audio").join(big), false).map_err(|e| format!("{big}: {e}"))?;
     let entry = archive
@@ -280,8 +296,8 @@ fn aems_files(root: &Path) -> Result<AemsFiles, String> {
     for (big, name) in MOMENTS_BANKS {
         files.banks.push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
     }
-    for (big, name) in VEHICLE_BANKS {
-        files.banks.push((name.to_owned(), Arc::from(big_file(root, big, name)?)));
+    for (big, name) in VEHICLE_BANKS.iter().chain(&CROWD_BANKS) {
+        files.asset_files.push((name.to_string(), Arc::from(big_file(root, big, name)?)));
     }
     Ok(files)
 }
@@ -313,7 +329,8 @@ fn load_system(mounts: &MountSet) -> Result<(AudioSystem, HashMap<String, u64>),
     let mix_map = std::fs::read(skate2_formats::host_path::on_disk(&root.join("data/audio/MixMapSK8.mxb"))).map_err(|e| format!("MixMapSK8.mxb: {e}"))?;
     let grains = grain_files(&root)?;
     let aems = aems_files(&root)?;
-    let db = AttribDb::load(mounts, &["data\\db\\skater.vlt"]).map_err(|e| e.to_string())?;
+    // `skater.vlt` and the challenge Vaults the contests' audio reads `challenges` from.
+    let db = AttribDb::load(mounts, &skate2_core::challenge::attrib_db::CAREER_VAULTS).map_err(|e| e.to_string())?;
     let (sounds, globals) = fe_sounds(&db);
     let mut system = AudioSystem::new();
     system.set_hom_banks(hom_banks(&root)?);
@@ -712,6 +729,16 @@ impl skate2_core::nis::audio::AudioInterface for GameAudioInterface {
     fn trigger_mission_music(&self, trigger: i32, challenge: u64, challenge_type: i32, race_tuning: u64) {
         trace_speech(format_args!("trigger mission music {trigger} for {challenge:#x} (type {challenge_type}, race tuning {race_tuning:#x})"));
         lock(&self.system).trigger_mission_music(trigger, skate2_audio::system::MissionMusic { challenge, challenge_type, race_tuning });
+    }
+
+    fn play_mission_sfx(&self, sfx: i32, challenge: u64, challenge_type: i32, race_tuning: u64) {
+        trace_speech(format_args!("play mission SFX {sfx} for {challenge:#x} (type {challenge_type})"));
+        lock(&self.system).play_mission_sfx(sfx, skate2_audio::system::MissionMusic { challenge, challenge_type, race_tuning });
+    }
+
+    fn cache_crowd_pod_infos(&self, pods: &[([f32; 4], i32)]) {
+        let pods: Vec<_> = pods.iter().map(|&(pod_pos, num_spectators)| skate2_audio::world::crowd::CrowdPodInfo { pod_pos, num_spectators }).collect();
+        lock(&self.system).cache_crowd_pod_infos(&pods);
     }
 
     fn restart_challenge(&self, retry: bool) {

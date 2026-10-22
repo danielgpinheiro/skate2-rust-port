@@ -334,6 +334,20 @@ impl AudioCore {
         plugin.and_then(|p| self.plugin::<SubMix>(p)).map(|s| s.slot)
     }
 
+    /// `SubMix::ReleaseEvent` 0x82bfc2d8: every Send and Route still connected to a released
+    /// SubMix is unlinked from it.
+    fn unlink_sub_mixes(&mut self, slots: &[usize]) {
+        for voice in self.voices.iter_mut().flatten() {
+            for plugin in &mut voice.plugins {
+                if let Some(send) = plugin.as_any_mut().downcast_mut::<Send>() {
+                    send.unlink(slots);
+                } else if let Some(route) = plugin.as_any_mut().downcast_mut::<Route>() {
+                    route.unlink(slots);
+                }
+            }
+        }
+    }
+
     /// `Voice::RemoveActiveVoice` 0x82be3a78.
     fn remove_active(&mut self, id: VoiceId) -> bool {
         if let Some(position) = self.active.iter().position(|&v| v == id) {
@@ -397,6 +411,10 @@ impl AudioCore {
                     }
                     self.timers.retain(|timer| timer.voice != id);
                     self.remove_active(id);
+                    let released: Vec<usize> = voice.plugins.iter().filter_map(|plugin| plugin.as_any().downcast_ref::<SubMix>().map(|sub_mix| sub_mix.slot)).collect();
+                    if !released.is_empty() {
+                        self.unlink_sub_mixes(&released);
+                    }
                 }
             }
             Command::SetPriority(id, priority) => {
@@ -536,5 +554,40 @@ impl AudioCore {
             self.dac_out.fill(0.0);
         }
         &self.dac_out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bus(core: &mut AudioCore, name: &str) -> VoiceId {
+        core.create_voice(5, "bus", &[PlugInConfig { kind: PlugInKind::SubMix { name: name.into() }, output_channels: 1 }]).expect("bus")
+    }
+
+    fn sends(core: &AudioCore, send: PluginRef) -> bool {
+        core.plugin::<Send>(send).is_some_and(Send::is_connected)
+    }
+
+    #[test]
+    fn a_released_sub_mix_unlinks_the_sends_into_it() {
+        let mut core = AudioCore::new();
+        let speaker = bus(&mut core, "Speaker SubMix");
+        let kept = bus(&mut core, "Kept");
+        let source = core
+            .create_voice(0, "source", &[PlugInConfig { kind: PlugInKind::SubMix { name: "Source".into() }, output_channels: 1 }, PlugInConfig { kind: PlugInKind::Send, output_channels: 1 }, PlugInConfig { kind: PlugInKind::Send, output_channels: 1 }])
+            .expect("source");
+        let into_speaker = PluginRef { voice: source, index: 1 };
+        let into_kept = PluginRef { voice: source, index: 2 };
+        core.connect_send(into_speaker, Some(PluginRef { voice: speaker, index: 0 }));
+        core.connect_send(into_kept, Some(PluginRef { voice: kept, index: 0 }));
+        core.render_frame();
+        assert!(sends(&core, into_speaker) && sends(&core, into_kept));
+        core.release_voice(speaker);
+        core.render_frame();
+        bus(&mut core, "Reuses the slot");
+        core.render_frame();
+        assert!(!sends(&core, into_speaker));
+        assert!(sends(&core, into_kept));
     }
 }

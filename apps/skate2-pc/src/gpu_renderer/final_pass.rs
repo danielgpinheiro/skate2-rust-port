@@ -18,6 +18,9 @@ pub(crate) struct FisheyeParameters {
     pub(crate) widescreen: bool,
     /// PC presentation adjustment, separate from original tuning.
     pub(crate) brightness: f32,
+    /// PC: the scene is larger than the target (Resolution Scale above 100%), so each target
+    /// pixel averages it rather than taking one sample. The renderer sets it from the sizes.
+    pub(crate) supersample: bool,
 }
 impl FisheyeParameters {
     /// PC preference: identity sampling and a white lens mask. Noise and
@@ -55,6 +58,7 @@ impl FisheyeParameters {
                 vignette: [0.0, 0.25, 0.0, 0.0],
                 widescreen: true,
                 brightness,
+                supersample: false,
             })
         })
     }
@@ -268,9 +272,17 @@ impl FinalPass {
 
     pub(super) fn exposure(&self)->f32 {self.postfx.exposure}
     pub(super) fn after_submit(&mut self){self.postfx.after_submit();}
-    pub(super) fn record_postfx(&mut self,queue:&wgpu::Queue,
-        encoder:&mut wgpu::CommandEncoder,assets:&crate::render_postfx::Assets,frame:&crate::render_postfx::Frame,eye:Option<&super::stereoscopy::Eye>)->RenderResult<()> {
-        self.postfx.record(queue,encoder,&self.scene,assets,frame,eye)
+    #[expect(clippy::too_many_arguments, reason = "the frame's PostFX inputs")]
+    pub(super) fn record_postfx(&mut self,device:&wgpu::Device,queue:&wgpu::Queue,
+        encoder:&mut wgpu::CommandEncoder,assets:&crate::render_postfx::Assets,frame:&crate::render_postfx::Frame,
+        deck_ao:Option<&super::deck_ao::DeckAoFrame>,eye:Option<&super::stereoscopy::Eye>)->RenderResult<()> {
+        self.postfx.record(device,queue,encoder,&self.scene,self.format,assets,frame,deck_ao,eye)
+    }
+
+    /// `RenderAOBoxes` on the scene a frame drew without PostFX.
+    pub(super) fn record_deck_ao(&mut self,device:&wgpu::Device,queue:&wgpu::Queue,encoder:&mut wgpu::CommandEncoder,
+        assets:&crate::render_postfx::Assets,frame:&crate::render_postfx::Frame,deck_ao:&super::deck_ao::DeckAoFrame) {
+        self.postfx.record_deck_ao(device,queue,encoder,&self.scene,self.format,assets,frame,deck_ao);
     }
 
     /// One call for each submitted scene frame; phase/RNG advance only when
@@ -303,7 +315,7 @@ impl FinalPass {
             noise.map_or([0.0; 4], |n| n.dot1),
             noise.map_or([0.0; 4], |n| n.dot2),
             uv_transform,
-            [parameters.brightness, 0.0, 0.0, 0.0],
+            [parameters.brightness, if parameters.supersample { 1.0 } else { 0.0 }, 0.0, 0.0],
         ];
         let bytes: Vec<u8> = values
             .into_iter()
@@ -406,7 +418,7 @@ mod tests {
     #[test]
     fn display_preferences_gain_and_lens_are_independent() {
         let base = super::FisheyeParameters { warp: [0.2, 0.9, 0.3, 0.],
-            vignette: [0., 0.25, 0., 0.], widescreen: true, brightness: 1. };
+            vignette: [0., 0.25, 0., 0.], widescreen: true, brightness: 1., supersample: false };
         for postfx in [false, true] {
             for fisheye in [false, true] {
                 let actual = base.for_display(skate2_core::ui::options::PcDisplaySettings {

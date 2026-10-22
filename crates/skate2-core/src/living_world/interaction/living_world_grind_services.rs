@@ -120,6 +120,8 @@ pub(crate) struct LivingWorldGrindServices {
     pub(crate) pedestrian_culls: Vec<crate::living_world_pedestrian_entity::PedestrianConstruction>,
     /// Sole PropMan owner, including waypoint-group payloads and reservations.
     pub(crate) props: Option<Box<waypoints::PropMan>>,
+    /// `Manager::mWaypointMan`: the spectator waypoint groups waiting for forced spectators.
+    pub(crate) waypoint_man: waypoints::spectators::WaypointMan,
     /// Same embedded ChaseMan constructed at Manager82721f00. Its message
     /// subscriptions and per-frame consumers are separate initialization work.
     pub(crate) chase: Option<crate::living_world_chase::ChaseMan>,
@@ -169,6 +171,7 @@ impl LivingWorldGrindServices {
             pedestrian_spawn_unfinished: None,
             pedestrian_culls: Vec::new(),
             props: None,
+            waypoint_man: waypoints::spectators::WaypointMan::new(),
             chase: None,
             mood: None,
             big_black_entity: None,
@@ -307,6 +310,8 @@ impl LivingWorldGrindServices {
         // LWPropMan.Init82e69ac0: component memory/entities/factory precede
         // the three execution groups, before Manager proceeds to DMO Init.
         self.props = Some(Box::new(waypoints::PropMan::initialize().map_err(LivingWorldInitError::Prop)?));
+        // Manager.Init's WaypointMan::Init (0x82ce7f50) empties the spectator queue.
+        self.waypoint_man.init();
         if let Some(cvars) = cvars {
             let props = self.props.as_mut().expect("PropMan retained above");
             props.factory_callbacks = Some(cvars.try_prop_factory_callbacks().map_err(LivingWorldInitError::CensusCvar)?);

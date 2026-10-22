@@ -16,6 +16,7 @@ use crate::challenge::players::{OnlineChallenge, PT_HUMAN, PlayersBackEnd};
 use crate::challenge::results::{OnlineResultRow, OnlineResults};
 use crate::challenge::system::Output;
 use crate::online::catalog;
+use crate::online::event_log::EventText;
 use crate::online::facts::{self, FactsCoder, FactsScope};
 use crate::players_backend_settings::PlayersBackendSettings;
 use super::super::career::HeldPresentation;
@@ -35,6 +36,10 @@ const REFILL_LEAD: u32 = 6;
 const SMOOTH_LEAD: u32 = 12;
 /// Past `SMOOTH_LEAD` a simulation tick runs two; past this, `CATCH_UP_TICKS`.
 const CATCH_UP_LEAD: u32 = 30;
+/// The most facts kept of another player, the furthest ahead going first: half a minute of its
+/// ticks, far past any lead the catch-up leaves. Facts for ticks or runs the round never reaches
+/// would otherwise pile up.
+const KEPT_FACTS: usize = 1800;
 
 /// The challenge ticks a simulation tick runs with `lead` of them ready.
 const fn ticks_for_lead(lead: u32) -> usize {
@@ -510,6 +515,14 @@ fn table(participants: &[u64; MAX_PLAYERS]) -> Vec<u64> {
     participants.iter().copied().take_while(|&user_id| user_id != 0).collect()
 }
 
+impl super::Online {
+    /// Whether the round's Leave Challenge is offered: the local player plays it and has not
+    /// finished it (PC port addition).
+    pub(in super::super) fn can_leave_challenge(&self) -> bool {
+        self.round.as_ref().is_some_and(|round| round.stage == Stage::Running)
+    }
+}
+
 impl<T, C> SelectedLiveSession<T, C> {
     /// The round is between `GameReset(LoadChallenge)` and lobby skate.
     pub(in super::super) fn online_challenge_running(&self) -> bool {
@@ -533,6 +546,7 @@ impl<T, C> SelectedLiveSession<T, C> {
                 reset::CHALLENGE => Phase::Challenge,
                 _ => Phase::LobbySkate,
             };
+            game.participants.clone_from(&players);
         }
         self.online.lobby_hud_dirty = true;
         match kind {
@@ -718,6 +732,9 @@ impl<T, C> SelectedLiveSession<T, C> {
                     facts.syncing = Some((stint, tick));
                 }
                 facts.frames.insert((stint, tick), (frame, notes));
+                while facts.frames.len() > KEPT_FACTS {
+                    facts.frames.pop_last();
+                }
             }
             Err(e) => trace(format_args!("{user_id:016x}: facts of tick {tick}: {e}")),
         }
@@ -873,6 +890,54 @@ impl<T, C> SelectedLiveSession<T, C> {
     /// addition: the original takes no join while a challenge runs).
     pub(super) fn online_apart_from_round(&self, user_id: u64) -> bool {
         self.online.round.as_ref().is_some_and(|round| !round.players.contains(&user_id))
+    }
+
+    /// The pause menu's Leave Challenge answered yes: the round ends at the next online update,
+    /// where a lobby reset ends one.
+    pub(in super::super) fn online_request_leave_challenge(&mut self) {
+        self.online.leave_challenge = true;
+    }
+
+    /// Leave Challenge (PC port addition): the server takes the local player out of the round,
+    /// which goes on for the others as without a player who left the game, and the local game
+    /// goes back to lobby skate at the game's location, where it waits in the pre-game lobby and
+    /// watches the round's players as ghosts until the game is back in lobby skate.
+    pub(super) fn online_leave_challenge(&mut self) -> Result<(), SelectedLiveError> {
+        if !self.online.can_leave_challenge() {
+            return Ok(());
+        }
+        trace(format_args!("leaving the challenge for the pre-game lobby"));
+        self.online.send(ClientMessage::LeaveChallenge);
+        if let Some(game) = self.online.game.as_mut()
+            && let Some(local) = self.online.user_id
+        {
+            game.participants.retain(|&participant| participant != local);
+        }
+        self.end_online_round()
+    }
+
+    /// `ChallengeLeave` (PC port addition): a player left the round for the pre-game lobby. To the
+    /// round's other players they leave as one who left the game does (their facts end, then they
+    /// disconnect) and their skater goes at once; the members waiting see them as themselves, no
+    /// longer a ghost. Everyone else's log names them.
+    pub(super) fn online_challenge_leave(&mut self, user_id: u64) {
+        let local = Some(user_id) == self.online.user_id;
+        let played = !local && self.online.round.as_ref().is_some_and(|round| round.players.contains(&user_id));
+        if played {
+            self.online_round_player_left(user_id);
+        }
+        let Some(game) = self.online.game.as_mut() else { return };
+        game.participants.retain(|&participant| participant != user_id);
+        if local {
+            return;
+        }
+        trace(format_args!("{} left the challenge", game.name(user_id)));
+        if played && let Some(remote) = game.remotes.get_mut(&user_id) {
+            remote.hide();
+        }
+        if game.entered {
+            self.online.event_log.add(EventText::literal(format!("{} has left the challenge.", game.name(user_id))));
+        }
     }
 
     /// The players pacing the next challenge tick (`Round::contributors`). Pins do not count:

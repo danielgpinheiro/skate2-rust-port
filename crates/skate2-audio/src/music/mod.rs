@@ -122,6 +122,7 @@ pub mod music_mode {
 
 /// `eEnvironmentType`.
 pub const ENV_DJ: i32 = 1;
+pub const ENV_CONTEST: i32 = 2;
 
 /// The stream tracks: the world, game and iPod projects' track 0 on voice 1, and all three.
 pub const WORLD_TRACK: u32 = 0x1100_0001;
@@ -154,6 +155,8 @@ const AUX_DSP_INFO: u64 = 0xC71A_D9EF_F39E_1EA2;
 /// the pitch ramp time, `rockStarTest` and the interactive music's control levels, score and
 /// curve.
 const MUSIC_TWEAKS_ATTR: u64 = 0xF30D_A7C3_D67C_2BC6;
+/// `aud_music::Challenge_FadeOut` 0x824e3df0: the curve a contest's last round fades out on.
+const CHALLENGE_FADE_OUT: u64 = 0x1A32_CF67_42ED_4205;
 /// Chase signed-byte control levels (StartChaseMusic82502a40/UpdateChaseState82506cd8).
 const CHASE_INTENSITY: u64 = 0xA8A0_F38E_15BE_962C;
 const PITCH_RAMP_TIME: u64 = 0x3265_D558_5CC4_B8E5;
@@ -459,14 +462,19 @@ pub struct MusicIo<'a> {
     pub master: PluginRef,
     pub music_master: PluginRef,
     pub env_send_sub_mix: PluginRef,
-    /// `CSTATEMGR_Speaker::GetMultiSpeakerSubmix(eSpeakerType_Music)`, the contest presets'
-    /// target off line (`AudioSystem::mbIsOnlineGame` false): `None` without multi-speaker voices.
+    /// The contest presets' target: on line (`AudioSystem::mbIsOnlineGame`) the music master,
+    /// else `CSTATEMGR_Speaker::GetMultiSpeakerSubmix(eSpeakerType_Music)` (`None` without
+    /// multi-speaker voices, which sends to the master submix).
     pub multi_speaker_music: Option<PluginRef>,
     /// `MicrophoneMan` microphone 0's position and direction, `None` without a microphone.
     pub listener: Option<(Vec3, Vec3)>,
     /// `AudioSystem::mChallengeType` and `mCurrentSceneInfo.sceneType`.
     pub challenge_type: i32,
     pub scene_type: i32,
+    /// `mCurrentSceneInfo.isReplayNIS`.
+    pub scene_is_replay_nis: bool,
+    /// `AudioSystem::mContestId` while a contest is loaded, with its `ChallengeType`.
+    pub contest: Option<(u64, i32)>,
     /// `AudioSystem::mCondScore - mCondPrevScore` and the local skater's `isWipingOut`.
     pub cond_score_delta: i32,
     pub local_wiping_out: bool,
@@ -527,6 +535,10 @@ pub struct MusicSystem {
     mid_to_outer_ratio: f32,
     first_init: bool,
     challenge_loading: bool,
+    /// `mAllContestRoundsOver` (+0x4B8): set from construction until a contest counts down.
+    all_contest_rounds_over: bool,
+    /// `mbInChallengeReplay` (+0x60A): a contest's replay music is playing.
+    in_challenge_replay: bool,
     environment_trigger_count: i32,
     set_default_mode_count: i32,
     last_chase_end_time: f64,
@@ -629,6 +641,8 @@ impl MusicSystem {
             mid_to_outer_ratio: 0.0,
             first_init: false,
             challenge_loading: false,
+            all_contest_rounds_over: true,
+            in_challenge_replay: false,
             environment_trigger_count: 0,
             set_default_mode_count: 0,
             last_chase_end_time: 0.0,
@@ -796,6 +810,7 @@ impl MusicSystem {
         }
         self.update_chyron();
         self.check_chase_state(io);
+        self.check_for_contest_replay(io);
         if self.set_default_mode_count > 0 {
             self.set_default_mode_count -= 1;
         }
@@ -1772,6 +1787,104 @@ impl MusicSystem {
         self.challenge_loading = true;
     }
 
+    /// `AudioSystem::RestartChallenge` with a contest loaded: `mbChallengeLoading`.
+    pub fn restart_contest(&mut self) {
+        self.challenge_loading = true;
+    }
+
+    /// `ChallengeTrigger` 0x824f76e8: a contest's music, with the music on, the environment the
+    /// default mode and no chase playing. The countdown stops the stream and turns the music
+    /// off; the start turns it on and plays the contest's playlist
+    /// (`EnvironmentTrigger(ENV_CONTEST)` on the contest channel map, the challenge type, 52
+    /// without one, as identifier); an abort or the end pauses it unless every round is over
+    /// (a type-26 contest's end is); the last round fades the iPod track's channel sets out; the
+    /// exit resets the music while a contest is loaded; a contest replay plays the playlist on
+    /// the replay map, and its end pauses it.
+    pub fn challenge_trigger(&mut self, request: i32, playlist: u64, challenge_type: i32, contest_loaded: bool, io: &mut MusicIo<'_>) {
+        if !self.music_system_enabled() || self.current_state.mode == mode::CHASE || self.default_mode != mode::ENVIRONMENT {
+            return;
+        }
+        let identifier = if challenge_type == -1 { 52 } else { challenge_type };
+        match request {
+            challenge_trigger::COUNTDOWN => {
+                self.stop_stream(io);
+                self.all_contest_rounds_over = false;
+                self.enable_music = false;
+            }
+            challenge_trigger::START => {
+                let enabled = self.enable_music;
+                self.challenge_loading = false;
+                if !enabled {
+                    self.stop_stream(io);
+                    self.enable_music = true;
+                }
+                let mut snd = self.snd(io);
+                self.path.set_volume(ALL_STREAM_TRACKS, 127, &mut snd);
+                self.in_notify_sphere = false;
+                self.all_contest_rounds_over = false;
+                self.environment_trigger(ENV_CONTEST, playlist, channel_map::CONTEST_IPOD, identifier as u32, -1, io);
+            }
+            challenge_trigger::ABORT | challenge_trigger::OVER => {
+                if identifier == 26 {
+                    self.all_contest_rounds_over = true;
+                }
+                if !self.all_contest_rounds_over {
+                    self.music_trigger(trigger::PAUSE);
+                }
+            }
+            challenge_trigger::END_ROUND => {
+                let curve = io.vault.i32(Collection::new(AUD_MUSIC, MUSIC_TWEAKS), CHALLENGE_FADE_OUT);
+                for set in [0, 2, 1, 3] {
+                    self.path.channels_volume_fade(IPOD_TRACK, set, 0, 3000, curve);
+                }
+            }
+            challenge_trigger::EXIT => {
+                if contest_loaded {
+                    self.music_trigger(trigger::RESET);
+                }
+                self.all_contest_rounds_over = true;
+                self.challenge_loading = false;
+            }
+            challenge_trigger::REPLAY_START => {
+                self.stop_stream(io);
+                self.music_trigger(trigger::RESUME);
+                let mut snd = self.snd(io);
+                self.path.set_volume(ALL_STREAM_TRACKS, 127, &mut snd);
+                self.in_notify_sphere = false;
+                self.environment_trigger(ENV_CONTEST, playlist, channel_map::CONTEST_IPOD_REPLAY, identifier as u32, -1, io);
+            }
+            challenge_trigger::REPLAY_END => {
+                self.music_trigger(trigger::PAUSE);
+                if contest_loaded {
+                    self.challenge_loading = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `CheckForContestReplay` 0x824f79f8 (`MusicSystem::Update`): with the music on and the
+    /// environment the default mode, a replay scene of a loaded contest starts its replay music
+    /// (`CHALLENGE_REPLAYSTART`, no playlist); once the target plays the replay map, the scene's
+    /// end ends it (`CHALLENGE_REPLAYEND` as a Best Trick).
+    fn check_for_contest_replay(&mut self, io: &mut MusicIo<'_>) {
+        if !self.music_system_enabled() || self.default_mode != mode::ENVIRONMENT {
+            return;
+        }
+        let contest_loaded = io.contest.is_some();
+        if self.target_state.data[5] == channel_map::CONTEST_IPOD_REPLAY {
+            if self.in_challenge_replay && !io.scene_is_replay_nis {
+                self.challenge_trigger(challenge_trigger::REPLAY_END, 0, 8, contest_loaded, io);
+                self.in_challenge_replay = false;
+            }
+        } else if io.scene_is_replay_nis {
+            if let Some((_, challenge_type)) = io.contest {
+                self.challenge_trigger(challenge_trigger::REPLAY_START, 0, challenge_type, contest_loaded, io);
+                self.in_challenge_replay = true;
+            }
+        }
+    }
+
     /// The target's `MusicChallengeData`.
     fn challenge_target(&self) -> [i32; 6] {
         let mut data = [0; 6];
@@ -2262,8 +2375,8 @@ impl MusicSystem {
     /// `MapStreamChannels` 0x82501310: the first call creates the two DSP voices and the four
     /// channel sets; each preset then routes the sets, each set's send going to the submix
     /// `SetDrySubmixPlugin` holds at the time (the system's master submix when it holds none).
-    /// Offline the contest presets route to `CSTATEMGR_Speaker::GetMultiSpeakerSubmix(
-    /// eSpeakerType_Music)`.
+    /// The contest presets route to the music master on line, else to
+    /// `CSTATEMGR_Speaker::GetMultiSpeakerSubmix(eSpeakerType_Music)`.
     fn map_stream_channels(&mut self, preset: i32, io: &mut MusicIo<'_>) {
         if self.preset_was == preset {
             return;

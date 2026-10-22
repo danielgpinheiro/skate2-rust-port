@@ -548,6 +548,10 @@ impl ShadowMaps {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
+            // wgpu sends the stencil reference to the driver only while a pipeline that reads it
+            // is bound, and a bundle binds its pipelines without it: bind the casters' first, or
+            // every bundled draw runs with an unset reference (undefined on Vulkan and DX12).
+            pass.set_pipeline(&self.world_caster);
             pass.set_stencil_reference(COVERAGE_STENCIL);
             pass.execute_bundles(std::iter::once(commands.as_ref()));
         }

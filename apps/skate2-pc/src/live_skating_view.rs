@@ -43,6 +43,8 @@ pub(crate) struct LiveSkatingView {
     marker_ui: Option<crate::marker_ui::MarkerUi>,
     audio: Option<crate::game_audio::GameAudio>,
     replay_watermarks:Option<[crate::gpu_renderer::GpuTexture;2]>,
+    /// `m_pTex_DeckAO`, which `SetTexturePointers` 0x82828728 leaves null when absent.
+    deck_occlusion: Option<crate::gpu_renderer::GpuTexture>,
     dynamic_objects: DmoRender,
     vehicles: crate::vehicle_render::VehicleRender,
     pedestrians: crate::pedestrian_render::PedestrianRender,
@@ -66,6 +68,8 @@ pub(crate) struct LiveSkatingView {
     visual_indicators: crate::visual_indicator_view::VisualIndicatorView,
     /// `ParticlePresentation`: the world's smoke, steam and leaves.
     particles: crate::particle_view::ParticleView,
+    /// `CrowdPresentation`'s imposter targets, one pedestrian draw per target slot.
+    crowd: Vec<crate::pedestrian_render::PedestrianRender>,
     /// `AptMovieIntegration`'s render side: the front end's movies.
     movie: crate::movie_playback::MovieRenderer,
 }
@@ -225,6 +229,9 @@ impl LiveSkatingView {
         Self {
             lighting: crate::render_irradiance::SkaterLighting::new(map.environment().default_irradiance),
             pedestrians: crate::pedestrian_render::PedestrianRender::new(Arc::clone(&mounts),Arc::clone(map.environment())),
+            crowd: (0..CROWD_TARGETS)
+                .map(|_| crate::pedestrian_render::PedestrianRender::crowd_target(Arc::clone(&mounts), Arc::clone(map.environment())))
+                .collect(),
             map,
             mounts,
             bindings: Vec::new(),
@@ -234,6 +241,7 @@ impl LiveSkatingView {
             marker_ui: None,
             audio: None,
             replay_watermarks:None,
+            deck_occlusion: None,
             dynamic_objects,
             vehicles,
             editor: None,
@@ -327,6 +335,8 @@ impl LiveSkatingView {
         // these boot textures while the city worker owns the mutable map/cache.
         self.replay_watermarks=Some([self.map.postfx_texture(renderer,"logo_watermark.Texture")?,
             self.map.postfx_texture(renderer,"logo_watermark_pro.Texture")?]);
+        self.deck_occlusion = self.map.postfx_texture(renderer, "board_occlusion.Texture")
+            .inspect_err(|error| eprintln!("deck AO boxes off: {error}")).ok();
         Ok(scene)
     }
 
@@ -592,6 +602,7 @@ impl LiveSkatingView {
             entity_type: visual.skater_entity_type,
             players_recipe: true,
             name_tag: None,
+            lobby_ghost: false,
         };
         let party: Vec<RetainedSkater> = visual
             .party_skaters
@@ -605,6 +616,7 @@ impl LiveSkatingView {
                 entity_type: skater.entity_type,
                 players_recipe: skater.players_recipe,
                 name_tag: skater.name_tag.clone(),
+                lobby_ghost: skater.lobby_ghost,
             })
             .collect();
         let shadow = visual.local_skater_shadow;
@@ -639,6 +651,7 @@ impl LiveSkatingView {
             dynamic_objects: std::mem::take(&mut visual.dynamic_objects),
             vehicles: std::mem::take(&mut visual.vehicles),
             pedestrians: std::mem::take(&mut visual.pedestrians),
+            crowd: std::mem::take(&mut visual.crowd),
             chase_arrows: std::mem::take(&mut visual.chase_arrows),
             visual_indicators: visual.visual_indicators.take(),
             in_replay: replay.is_some(),
@@ -851,6 +864,19 @@ impl LiveSkatingView {
             }
             at += objects.bindings.len();
         }
+        // PostFX::RenderAOBoxes 0x828465b0 after the uber pass: a box under each skater the
+        // game state draws (`CalculateDeckShadowMatrix` 0x82845f98), `board_occlusion.Texture`.
+        let camera_rows = [view.right, view.up, view.forward, view.position];
+        let deck_boxes: Vec<_> = std::iter::once(&local)
+            .chain(party.iter())
+            .filter(|skater| !skater.lobby_ghost && drawn(skater.entity_type, 0, skater.players_recipe))
+            .filter_map(|skater| crate::gpu_renderer::deck_ao::deck_box(&skater.palette.deck_world()?, &clip_from_world, camera_rows))
+            .collect();
+        scene.deck_ao = self.deck_occlusion.clone().map(|texture| crate::gpu_renderer::deck_ao::DeckAoFrame {
+            texture,
+            boxes: deck_boxes,
+            fov: crate::gpu_renderer::deck_ao::fov(&clip_from_world, view.right, view.up),
+        });
         // SceneRenderView::Render 0x828508f8: DrawName for each entity SceneRenderView::Cull
         // 0x828500a8 kept, none in a replay.
         let tags: Vec<crate::marker_ui::online_names::NameTag<'_>> = party
@@ -912,6 +938,9 @@ impl LiveSkatingView {
         let span = profile::span(profile::VIEW_PEDESTRIANS);
         self.pedestrians.update(renderer,&mut scene.objects,prior_pedestrians,&retained.pedestrians,
             &camera,self.map.frame_environment(),restore,|visual|drawn(ENTITY_PEDESTRIAN,visual.model_key,false))?;
+        let prior_crowd = scene.crowd.take_targets();
+        scene.crowd = crowd_frame(&mut self.crowd, renderer, prior_crowd, &retained.crowd, &camera, view.forward,
+            self.map.frame_environment())?;
         drop(span);
         // The ambient effect's anchor: the local skater's audio centre of mass plus its hips' up
         // axis (`Update` 0x827ee4b4..d8), here the hips a metre up.
@@ -969,6 +998,9 @@ struct RetainedSkater {
     players_recipe: bool,
     /// Its online name while `mDrawPlayerName` is set.
     name_tag: Option<skate2_core::SkaterNameTag>,
+    /// A challenge's player watched from its pre-game lobby: its tick's ghost opacity holds,
+    /// and it casts no deck shadow.
+    lobby_ghost: bool,
 }
 
 impl RetainedSkater {
@@ -980,10 +1012,11 @@ impl RetainedSkater {
                 materials: &self.materials,
                 hips_position: restored.hips_position,
                 bounds: restored.bounds,
-                ghost: CharacterGhostState { opacity: restored.opacity, ghosted: restored.ghosted },
+                ghost: if self.lobby_ghost { self.ghost } else { CharacterGhostState { opacity: restored.opacity, ghosted: restored.ghosted } },
                 entity_type: self.entity_type,
                 players_recipe: self.players_recipe,
                 name_tag: self.name_tag.as_ref(),
+                lobby_ghost: self.lobby_ghost,
             },
             None => SkaterDraw {
                 palette: &self.palette,
@@ -994,6 +1027,7 @@ impl RetainedSkater {
                 entity_type: self.entity_type,
                 players_recipe: self.players_recipe,
                 name_tag: self.name_tag.as_ref(),
+                lobby_ghost: self.lobby_ghost,
             },
         }
     }
@@ -1009,6 +1043,7 @@ struct SkaterDraw<'a> {
     entity_type: u32,
     players_recipe: bool,
     name_tag: Option<&'a skate2_core::SkaterNameTag>,
+    lobby_ghost: bool,
 }
 
 /// The skater `PostFX::RenderShadows_CSM` 0x82855888 fits the cascades to.
@@ -1040,12 +1075,72 @@ struct RetainedFrame {
     dynamic_objects: Vec<skate2_core::SelectedDynamicObjectVisual>,
     vehicles: Vec<skate2_core::SelectedVehicleVisual>,
     pedestrians: Vec<skate2_core::SelectedPedestrianVisual>,
+    /// The tick's `CrowdPresentation` targets and imposters.
+    crowd: skate2_core::SelectedCrowdVisual,
     /// The tick's `ChaseArrowMan` arrows.
     chase_arrows: Vec<skate2_core::ui::chase_arrows::Arrow>,
     /// The tick's `VDReaderData` challenge indicator records, in a career.
     visual_indicators: Option<skate2_core::challenge::visual_director::VisualIndicatorFrame>,
     /// A replay draws the frame (`Presentation::IsInReplay`): no names.
     in_replay: bool,
+}
+
+/// `CrowdPresentation`'s six imposter targets.
+const CROWD_TARGETS: usize = 6;
+
+fn multiply(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    std::array::from_fn(|row| std::array::from_fn(|column| (0..4).map(|k| a[row][k] * b[k][column]).sum()))
+}
+
+/// `RenderCrowdTargets`' pedestrians, each in its slot under its cell's camera: its own
+/// view-projection over the game camera's position, which `g_vViewPos` keeps through the
+/// atlas pass. Then the imposters, `SyncAnim`'s `UpdateTransform` facing this frame's camera,
+/// sized by their target (`i_matModelTarget`) and mapped into its cell (`i_matTexture`).
+fn crowd_frame(
+    slots: &mut [crate::pedestrian_render::PedestrianRender],
+    renderer: &GpuRenderer,
+    prior: Vec<crate::gpu_renderer::crowd::Target>,
+    crowd: &skate2_core::SelectedCrowdVisual,
+    camera: &CameraRelativeClip,
+    camera_z: [f32; 3],
+    environment: crate::gpu_renderer::FrameEnvironment,
+) -> crate::gpu_renderer::RenderResult<crate::gpu_renderer::crowd::Frame> {
+    let mut prior = prior.into_iter();
+    let mut targets = Vec::new();
+    for (index, slot) in slots.iter_mut().enumerate() {
+        let previous = prior.next().map(|target| target.objects).unwrap_or_default();
+        let target = crowd.targets.get(index);
+        let visuals = target.and_then(|target| target.pedestrian.as_ref()).map(std::slice::from_ref).unwrap_or_default();
+        let clip = target.map_or([[0.0; 4]; 4], |target| multiply(&target.camera.view, &target.camera.projection));
+        let clip_from_world: [f32; 16] = std::array::from_fn(|index| clip[index / 4][index % 4]);
+        let atlas = CameraRelativeClip::new(&clip_from_world, camera.camera);
+        let mut objects = Vec::new();
+        slot.update(renderer, &mut objects, previous, visuals, &atlas, environment, None, |_| true)?;
+        if let Some(target) = target {
+            targets.push(crate::gpu_renderer::crowd::Target { objects, scissor: target.scissor });
+        }
+    }
+    let imposters: Vec<_> = crowd
+        .imposters
+        .iter()
+        .filter_map(|imposter| {
+            let target = crowd.targets.get(imposter.target)?;
+            let mut rows = multiply(&target.camera.model, &skate2_core::imposter_transform(camera_z, imposter.position));
+            for (lane, origin) in rows[3].iter_mut().zip(camera.camera) {
+                *lane -= origin;
+            }
+            let texture = target.camera.texture;
+            Some(crate::gpu_renderer::crowd::Imposter {
+                rows,
+                texture: [
+                    [texture[0][0], texture[1][0], texture[3][0], 0.0],
+                    [texture[0][1], texture[1][1], texture[3][1], 0.0],
+                ],
+                colours: imposter.colours,
+            })
+        })
+        .collect();
+    Ok(renderer.crowd_frame(targets, &imposters, camera, [environment.fog_k1, environment.fog_colour]))
 }
 
 /// `eEntTyp` values of the gameplay entities a NIS can leave out (the scene

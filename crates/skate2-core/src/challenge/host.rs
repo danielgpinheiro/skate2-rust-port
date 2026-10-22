@@ -19,6 +19,15 @@ pub trait Host: Send {
     fn race_gate_volume(&self, _volume_id: f32) -> Option<([f32; 16], [f32; 3])> {
         None
     }
+    /// `cTriggerVolumeManager::GetTriggerInstance` (`0x82e21cc0`) and
+    /// `TriggerVolumeUtils::GetTriggerBoundingVolume` (`0x82e20bb8`) of a crowd's volume: `None`
+    /// while no instance of it is streamed in, `Some(None)` for an instance without a bounding
+    /// volume; else the bounding volume's transform composed with the instance's and
+    /// `ComputerTriggerVolumeRadius` (`0x82e21508`): a box's half extents, any other volume's
+    /// radius on all three axes, W zero.
+    fn crowd_volume(&self, _volume_id: f32) -> Option<Option<([f32; 16], [f32; 4])>> {
+        None
+    }
     /// `cLocationManager::GetLocationOrientation` (`0x82a8de48`): the orientation of the
     /// location registered under the hash, `None` when none is.
     fn location_orientation(&self, _location: u32) -> Option<[f32; 16]> {

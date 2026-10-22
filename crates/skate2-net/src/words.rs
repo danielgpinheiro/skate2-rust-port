@@ -82,14 +82,7 @@ impl WordList {
     /// when only that one exists.
     #[must_use]
     pub fn beside_server() -> Self {
-        let beside = std::env::current_exe().ok().and_then(|executable| Some(executable.parent()?.join(FILE_NAME)));
-        let working = std::env::current_dir().ok().map(|directory| directory.join(FILE_NAME));
-        let path = match (beside, working) {
-            (Some(beside), Some(working)) if !beside.is_file() && working.is_file() => working,
-            (Some(beside), _) => beside,
-            (None, working) => working.unwrap_or_else(|| PathBuf::from(FILE_NAME)),
-        };
-        Self::from_file(path)
+        Self::from_file(crate::server::server_file(FILE_NAME))
     }
 
     /// The file the list is read from.

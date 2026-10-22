@@ -468,6 +468,9 @@ pub enum ClientMessage {
     ListLobbies,
     /// The lobby browser's A on a listed game (PC port addition).
     JoinLobby { game: u32 },
+    /// The pause menu's Leave Challenge (PC port addition): the participant leaves the challenge
+    /// in progress and waits in its pre-game lobby until the game is back in lobby skate.
+    LeaveChallenge,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -476,8 +479,9 @@ pub enum ServerMessage {
     Refused { reason: u8 },
     PlayNowResult { result: u8 },
     /// The game a player joined: its id, the player's slot, attributes, players in join order
-    /// (the first is the game host peer, `Net::GetGameHostPeerID` 0x82641098) and phase.
-    GameJoined { game: u32, slot: u8, attributes: GameAttributes, players: Vec<PlayerInfo>, phase: Phase },
+    /// (the first is the game host peer, `Net::GetGameHostPeerID` 0x82641098), phase, and the
+    /// members playing the challenge in progress (none in lobby skate).
+    GameJoined { game: u32, slot: u8, attributes: GameAttributes, players: Vec<PlayerInfo>, phase: Phase, participants: Vec<u64> },
     GameAttributes(GameAttributes),
     /// `GameAttributeUpdate` of `IsPrivate`.
     PrivacyChanged { private: bool },
@@ -511,6 +515,9 @@ pub enum ServerMessage {
     Chat { user_id: u64, text: String },
     /// The public games, for the lobby browser (PC port addition).
     Lobbies(Vec<LobbyInfo>),
+    /// A participant left the challenge for its pre-game lobby (`LeaveChallenge`, PC port
+    /// addition), to every member of the game.
+    ChallengeLeave { user_id: u64 },
 }
 
 /// A run: its first tick and length, the frames it is coded against as their distance back from
@@ -641,6 +648,7 @@ impl ClientMessage {
                 w.u8(20);
                 w.u32(*game);
             }
+            Self::LeaveChallenge => w.u8(21),
         }
         w.into_vec()
     }
@@ -712,6 +720,7 @@ impl ClientMessage {
             18 => Self::Chat(r.string(CHAT_CHARACTERS)?),
             19 => Self::ListLobbies,
             20 => Self::JoinLobby { game: r.u32()? },
+            21 => Self::LeaveChallenge,
             _ => return Err(DecodeError("unknown client message")),
         };
         r.finish()?;
@@ -736,7 +745,7 @@ impl ServerMessage {
                 w.u8(2);
                 w.u8(*result);
             }
-            Self::GameJoined { game, slot, attributes, players, phase } => {
+            Self::GameJoined { game, slot, attributes, players, phase, participants } => {
                 w.u8(3);
                 w.u32(*game);
                 w.u8(*slot);
@@ -746,6 +755,10 @@ impl ServerMessage {
                     player.write(&mut w);
                 }
                 w.u8(phase.code());
+                w.varint(participants.len() as u64);
+                for participant in participants {
+                    w.u64(*participant);
+                }
             }
             Self::GameAttributes(attributes) => {
                 w.u8(4);
@@ -852,6 +865,10 @@ impl ServerMessage {
                     lobby.write(&mut w);
                 }
             }
+            Self::ChallengeLeave { user_id } => {
+                w.u8(25);
+                w.u64(*user_id);
+            }
         }
         w.into_vec()
     }
@@ -874,7 +891,10 @@ impl ServerMessage {
                 let attributes = GameAttributes::read(&mut r)?;
                 let count = r.len(MAX_PLAYERS)?;
                 let players = (0..count).map(|_| PlayerInfo::read(&mut r)).collect::<DecodeResult<Vec<_>>>()?;
-                Self::GameJoined { game, slot, attributes, players, phase: Phase::from_code(r.u8()?)? }
+                let phase = Phase::from_code(r.u8()?)?;
+                let count = r.len(MAX_PLAYERS)?;
+                let participants = (0..count).map(|_| r.u64()).collect::<DecodeResult<Vec<_>>>()?;
+                Self::GameJoined { game, slot, attributes, players, phase, participants }
             }
             4 => Self::GameAttributes(GameAttributes::read(&mut r)?),
             5 => Self::PrivacyChanged { private: r.bool()? },
@@ -929,6 +949,7 @@ impl ServerMessage {
                 let count = r.len(MAX_LOBBIES)?;
                 Self::Lobbies((0..count).map(|_| LobbyInfo::read(&mut r)).collect::<DecodeResult<_>>()?)
             }
+            25 => Self::ChallengeLeave { user_id: r.u64()? },
             _ => return Err(DecodeError("unknown server message")),
         };
         r.finish()?;
@@ -985,6 +1006,7 @@ mod tests {
             ClientMessage::Chat("gg, one more?".into()),
             ClientMessage::ListLobbies,
             ClientMessage::JoinLobby { game: 41 },
+            ClientMessage::LeaveChallenge,
         ];
         for message in messages {
             assert_eq!(ClientMessage::decode(&message.encode()).unwrap(), message);
@@ -998,7 +1020,8 @@ mod tests {
             ServerMessage::Welcome { user_id: 5 },
             ServerMessage::Refused { reason: refuse::VERSION },
             ServerMessage::PlayNowResult { result: play_now::NO_MATCH },
-            ServerMessage::GameJoined { game: 3, slot: 1, attributes: attributes(), players: vec![player.clone()], phase: Phase::Challenge },
+            ServerMessage::GameJoined { game: 3, slot: 1, attributes: attributes(), players: vec![player.clone()], phase: Phase::Challenge, participants: vec![2, 9] },
+            ServerMessage::GameJoined { game: 4, slot: 0, attributes: attributes(), players: vec![], phase: Phase::LobbySkate, participants: vec![] },
             ServerMessage::GameAttributes(attributes()),
             ServerMessage::PrivacyChanged { private: true },
             ServerMessage::PlayerJoin(player),
@@ -1024,6 +1047,7 @@ mod tests {
                 LobbyInfo { game: 7, challenge_type: challenge::OWN_THE_SPOT, challenge_key: 0x55, players: 3, max_players: 8, phase: Phase::LobbySkate },
                 LobbyInfo { game: 9, challenge_type: challenge::ONLINE_FREE_SKATE, challenge_key: 0x66, players: 8, max_players: 8, phase: Phase::Challenge },
             ]),
+            ServerMessage::ChallengeLeave { user_id: 6 },
         ];
         for message in messages {
             assert_eq!(ServerMessage::decode(&message.encode()).unwrap(), message);

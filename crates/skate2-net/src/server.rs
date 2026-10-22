@@ -7,6 +7,8 @@
 
 use crate::crypto::{Build, Handshake, KEY_BYTES, PROOF_BYTES, Session};
 use crate::frames::{AckState, FrameReceiver, encode_for};
+use crate::moderation::{self, BanList, PanelKey};
+use crate::panel;
 use crate::protocol::{
     ClientMessage, GameAttributes, GameResult, LobbyInfo, MAX_LOBBIES, MAX_PLAYERS, Phase, PlayNow, PlayNowMode, PlayerInfo, PlayerStats,
     ServerMessage, challenge, leave, play_now, refuse, request, reset, timer, valid_chat, valid_nickname,
@@ -15,7 +17,8 @@ use crate::transport::{self, Endpoint, PROTOCOL_VERSION, kind, read_header};
 use crate::words::WordList;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::Write as _;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -201,6 +204,10 @@ struct Game {
     phase: GamePhase,
     session: u32,
     change: Option<(u8, u64, Instant)>,
+    /// The addresses of the players its host kicked (PC port addition): the lobby browser and
+    /// matchmaking hide the game from them, and it takes none of them again, whatever name they
+    /// come back under.
+    kicked: BTreeSet<IpAddr>,
 }
 
 impl Game {
@@ -250,13 +257,14 @@ impl Game {
         }
     }
 
-    /// Whether two members are kept apart: from a challenge's load until the game is back in
-    /// lobby skate, its participants and the members in lobby skate (who joined during it, were
-    /// not yet in the world at its start, or did not load it) see nothing of each other, as in
-    /// the original.
-    fn apart(&self, a: u64, b: u64) -> bool {
+    /// Whether `viewer` sees nothing of `source`'s skater: from a challenge's load until the game
+    /// is back in lobby skate, its participants see nothing of the members in lobby skate (who
+    /// joined during it, were not yet in the world at its start, did not load it, or left it), as
+    /// in the original. Those members watch the participants (PC port addition), whom their game
+    /// shows as ghosts.
+    fn hidden_from(&self, source: u64, viewer: u64) -> bool {
         let participants = self.participants();
-        participants.contains(&a) != participants.contains(&b)
+        participants.contains(&viewer) && !participants.contains(&source)
     }
 
     /// The attributes a player joining now loads into: the game's, or the pending `GameChange`'s
@@ -300,6 +308,13 @@ pub struct ServerCore {
     log: Log,
     /// The words no nickname may hold and no relayed chat line holds (`badwords.txt`).
     words: WordList,
+    /// The chat-shadowbanned addresses (`chat-shadowbans.json`): a member's chat line from one
+    /// comes back to it alone.
+    chat_shadowbans: BanList,
+    /// The banned addresses (`ip-bans.json`): no datagram from one is read or answered.
+    ip_bans: BanList,
+    /// When the ban lists' files were last looked at for changes.
+    bans_checked: Option<Instant>,
 }
 
 impl ServerCore {
@@ -317,12 +332,22 @@ impl ServerCore {
             outgoing: Vec::new(),
             log,
             words: WordList::default(),
+            chat_shadowbans: BanList::default(),
+            ip_bans: BanList::default(),
+            bans_checked: None,
         }
     }
 
     /// The word list nicknames and chat lines are checked against.
     pub fn set_words(&mut self, words: WordList) {
         self.words = words;
+    }
+
+    /// The chat-shadowbanned and the banned addresses (PC port addition).
+    pub fn set_bans(&mut self, chat_shadowbans: BanList, ip_bans: BanList) {
+        self.chat_shadowbans = chat_shadowbans;
+        self.ip_bans = ip_bans;
+        self.bans_checked = None;
     }
 
     /// Connections signed in.
@@ -341,8 +366,12 @@ impl ServerCore {
         std::mem::take(&mut self.outgoing)
     }
 
-    /// A datagram from `addr`.
+    /// A datagram from `addr`. One from a banned address is not even read: the server never
+    /// answers it.
     pub fn receive(&mut self, addr: SocketAddr, datagram: &[u8], now: Instant) {
+        if self.ip_bans.contains(addr.ip()) {
+            return;
+        }
         let Some((header, mut reader)) = read_header(datagram) else { return };
         if header.version != PROTOCOL_VERSION {
             if header.kind == kind::CONNECT
@@ -494,6 +523,11 @@ impl ServerCore {
         self.connections.get(&id)?.user.as_ref()?.game
     }
 
+    /// The address a connection's datagrams come from, as kicks and bans hold it.
+    fn address(&self, id: u32) -> Option<IpAddr> {
+        self.connections.get(&id).map(|connection| moderation::address(connection.addr.ip()))
+    }
+
     fn handle(&mut self, id: u32, message: ClientMessage, reliable: bool, now: Instant) {
         if reliable && self.connections.get_mut(&id).is_some_and(|connection| !connection.messages.take(MESSAGE_RATE, now)) {
             (self.log)(&format!("connection {id} sent reliable messages faster than the game does: dropped"));
@@ -604,9 +638,11 @@ impl ServerCore {
     /// 0x82767cf8 for everything but a quick match, at the chosen location or the one the game
     /// picked. A free skate or private game is never ranked (`DoPlayNow` 0x827736b8). The search
     /// must be of the player's own version, a free skate searched as one and a challenge as one;
-    /// a game with no one in it is never offered.
+    /// a game with no one in it is never offered, nor one whose host kicked a player from the
+    /// searcher's address (PC port addition).
     fn play_now(&mut self, id: u32, user_id: u64, play: &PlayNow, now: Instant) {
         let Some(version) = self.connections.get(&id).and_then(|c| c.user.as_ref()).map(|user| user.version.clone()) else { return };
+        let Some(address) = self.address(id) else { return };
         let free_skate = play.challenge_type == challenge::ONLINE_FREE_SKATE;
         let consistent = play.game_version == version
             && match play.mode {
@@ -637,6 +673,7 @@ impl ServerCore {
                         && attributes.ranked == ranked
                         && !game.members.is_empty()
                         && !game.full()
+                        && !game.kicked.contains(&address)
                         && match play.mode {
                             PlayNowMode::Quick => ranked || attributes.challenge_type != challenge::ONLINE_FREE_SKATE,
                             PlayNowMode::Custom | PlayNowMode::Freeskate => {
@@ -676,6 +713,7 @@ impl ServerCore {
                         phase: GamePhase::LobbySkate,
                         session,
                         change: None,
+                        kicked: BTreeSet::new(),
                     },
                 );
                 (self.log)(&format!("game {game} created: type {} challenge {location:016x}", play.challenge_type));
@@ -685,19 +723,26 @@ impl ServerCore {
         self.join(id, user_id, game, now);
     }
 
-    /// Whether the lobby browser lists a game to a player of `version`: public, unranked, of the
-    /// version, wherever a location change is taking it.
-    fn listed(game: &Game, version: &str) -> Option<GameAttributes> {
+    /// Whether the lobby browser lists a game to a player of `version` at `address`: public,
+    /// unranked, of the version, wherever a location change is taking it, and not one whose host
+    /// kicked a player from the address.
+    fn listed(game: &Game, version: &str, address: IpAddr) -> Option<GameAttributes> {
         let attributes = game.upcoming_attributes();
-        (attributes.game_version == version && !attributes.private && !attributes.ranked && !game.members.is_empty()).then_some(attributes)
+        (attributes.game_version == version
+            && !attributes.private
+            && !attributes.ranked
+            && !game.members.is_empty()
+            && !game.kicked.contains(&address))
+        .then_some(attributes)
     }
 
     /// The lobby browser's listing (PC port addition): every game it lists to the player, the
     /// ones with room first, then the fuller and the older.
     fn lobbies(&self, id: u32) -> Vec<LobbyInfo> {
         let Some(version) = self.connections.get(&id).and_then(|c| c.user.as_ref()).map(|user| user.version.as_str()) else { return Vec::new() };
+        let Some(address) = self.address(id) else { return Vec::new() };
         let mut lobbies: Vec<(&Game, GameAttributes)> =
-            self.games.values().filter_map(|game| Some((game, Self::listed(game, version)?))).collect();
+            self.games.values().filter_map(|game| Some((game, Self::listed(game, version, address)?))).collect();
         lobbies.sort_by_key(|(game, _)| (game.full(), std::cmp::Reverse(game.members.len()), game.id));
         lobbies
             .into_iter()
@@ -723,7 +768,8 @@ impl ServerCore {
             self.leave_game(id, leave::QUIT, now);
         }
         let Some(version) = self.connections.get(&id).and_then(|c| c.user.as_ref()).map(|user| user.version.clone()) else { return };
-        let full = self.games.get(&game_id).filter(|game| Self::listed(game, &version).is_some()).map(Game::full);
+        let Some(address) = self.address(id) else { return };
+        let full = self.games.get(&game_id).filter(|game| Self::listed(game, &version, address).is_some()).map(Game::full);
         match full {
             None => self.send(id, &ServerMessage::PlayNowResult { result: play_now::NO_MATCH }),
             Some(true) => self.send(id, &ServerMessage::PlayNowResult { result: play_now::FULL }),
@@ -733,11 +779,18 @@ impl ServerCore {
 
     fn join(&mut self, id: u32, user_id: u64, game_id: u32, now: Instant) {
         let Some(name) = self.connections.get(&id).and_then(|c| c.user.as_ref()).map(|user| user.name.clone()) else { return };
+        let Some(address) = self.address(id) else { return };
         let Some(game) = self.games.get_mut(&game_id) else { return };
         // A private game takes no one after the player who made it: matchmaking never offers one,
         // and nothing else may put a player in.
         if game.attributes.private && !game.members.is_empty() {
             self.send(id, &ServerMessage::PlayNowResult { result: play_now::FULL });
+            return;
+        }
+        // Nor does a game take a player from an address its host kicked one from: matchmaking and
+        // the lobby browser never offer it to one.
+        if game.kicked.contains(&address) {
+            self.send(id, &ServerMessage::PlayNowResult { result: play_now::NO_MATCH });
             return;
         }
         let Some(slot) = game.free_slot().filter(|_| !game.full()) else {
@@ -764,6 +817,7 @@ impl ServerCore {
             attributes: game.upcoming_attributes(),
             players: game.players(),
             phase: game.phase_code(),
+            participants: game.participants().to_vec(),
         };
         let recipes: Vec<(u64, Arc<Vec<u8>>)> =
             game.members.iter().filter_map(|member| Some((member.user_id, Arc::clone(member.recipe.as_ref()?)))).collect();
@@ -889,6 +943,19 @@ impl ServerCore {
                 self.relay_to_participants(game_id, user_id, &ServerMessage::Facts { slot, tick, stint, notes, data });
             }
             ClientMessage::Vote { score } => self.relay_to_participants(game_id, user_id, &ServerMessage::Vote { user_id, score }),
+            // Leave Challenge (PC port addition): the challenge goes on without the participant,
+            // as without one who left the game, and the participant waits in its pre-game lobby
+            // with the members in lobby skate.
+            ClientMessage::LeaveChallenge => {
+                let Some(game) = self.games.get(&game_id) else { return };
+                if !game.participants().contains(&user_id) {
+                    return;
+                }
+                let name = game.member(user_id).map(|member| member.name.clone()).unwrap_or_default();
+                (self.log)(&format!("{name} left game {game_id}'s challenge"));
+                self.broadcast(game_id, &ServerMessage::ChallengeLeave { user_id }, None);
+                self.remove_participant(game_id, user_id, now);
+            }
             _ => {}
         }
     }
@@ -908,7 +975,8 @@ impl ServerCore {
     /// A member's chat line, to every member of its game (the sender too). The game is the one
     /// the server put the member in, so no line reaches another game; a line the game's prompt
     /// cannot make drops the connection; one sent before `ChatEnabled`, past the flood limit or
-    /// holding a word of the server's list is dropped.
+    /// holding a word of the server's list is dropped, and a chat-shadowbanned member's comes back
+    /// to it alone.
     fn chat(&mut self, game_id: u32, user_id: u64, text: String, now: Instant) {
         let Some(member) = self.games.get_mut(&game_id).and_then(|game| game.member_mut(user_id)) else { return };
         if !valid_chat(&text) {
@@ -927,9 +995,16 @@ impl ServerCore {
             return;
         }
         member.chat_sent.push_back(now);
-        let name = member.name.clone();
+        let (name, connection) = (member.name.clone(), member.connection);
         if self.words.holds_word(&text) {
             (self.log)(&format!("chat in game {game_id} from {name} held back: it holds a listed word"));
+            return;
+        }
+        // A chat-shadowbanned member sees its line go through, as any line does; no one else sees
+        // it (PC port addition).
+        if self.address(connection).is_some_and(|address| self.chat_shadowbans.contains(address)) {
+            (self.log)(&format!("chat in game {game_id} from {name}, chat-shadowbanned, to them alone: {text}"));
+            self.send(connection, &ServerMessage::Chat { user_id, text });
             return;
         }
         (self.log)(&format!("chat in game {game_id} from {name}: {text}"));
@@ -994,9 +1069,17 @@ impl ServerCore {
                 self.broadcast(game_id, &ServerMessage::PrivacyChanged { private: value != 0 }, None);
             }
             request::KICK_PLAYER => {
-                let Some(target) = self.games.get(&game_id).and_then(|game| game.member(value)).map(|member| member.connection) else { return };
+                let Some((target, name)) = self.games.get(&game_id).and_then(|game| game.member(value)).map(|member| (member.connection, member.name.clone())) else { return };
                 if value == user_id {
                     return;
+                }
+                // The kicked player's address stays out of the game, under any name (PC port
+                // addition).
+                if let Some(address) = self.address(target)
+                    && let Some(game) = self.games.get_mut(&game_id)
+                {
+                    game.kicked.insert(address);
+                    (self.log)(&format!("game {game_id}'s host kicked {name}: the game takes no one from {address} again"));
                 }
                 self.send(target, &ServerMessage::Kicked { reason: leave::KICKED_BY_HOST });
                 self.leave_game(target, leave::KICKED_BY_HOST, now);
@@ -1063,6 +1146,13 @@ impl ServerCore {
                 self.broadcast(game_id, &ServerMessage::GameReset { kind: reset::CHALLENGE, seed, session, participants: slots }, None);
             }
             GamePhase::Challenge { participants, rounds, complete, results, all_complete, deadline } => {
+                if participants.is_empty() {
+                    (self.log)(&format!("game {game_id}: challenge {} ended, every participant left it", game.session));
+                    game.phase = GamePhase::LobbySkate;
+                    let session = game.session;
+                    self.broadcast(game_id, &ServerMessage::GameReset { kind: reset::LOBBY_SKATE, seed: 0, session, participants: [0; MAX_PLAYERS] }, None);
+                    return;
+                }
                 let released: Vec<u32> = rounds
                     .iter()
                     .filter(|(_, (arrived, round_deadline))| participants.iter().all(|participant| arrived.contains(participant)) || now >= *round_deadline)
@@ -1175,7 +1265,7 @@ impl ServerCore {
         let slot = game.members[source].slot;
         let mut sends = Vec::new();
         for member in &game.members {
-            if member.user_id == user_id || game.apart(user_id, member.user_id) {
+            if member.user_id == user_id || game.hidden_from(user_id, member.user_id) {
                 continue;
             }
             let acks = member.holds.get(&user_id).copied().unwrap_or_default();
@@ -1216,6 +1306,9 @@ impl ServerCore {
 
     /// Timers and connection upkeep, then every connection's datagrams.
     pub fn update(&mut self, now: Instant) {
+        if self.bans_checked.is_none_or(|checked| now.saturating_duration_since(checked) >= BAN_CHECK) {
+            self.refresh_bans(now);
+        }
         let lost: Vec<u32> = self.connections.iter().filter(|(_, c)| c.endpoint.timed_out(now)).map(|(&id, _)| id).collect();
         for id in lost {
             self.drop_connection(id, leave::LOST_CONNECTION, now);
@@ -1253,10 +1346,151 @@ impl ServerCore {
             }
         }
     }
+
+    /// Reads the ban lists' files again where they changed; an address the IP bans now hold
+    /// loses its connections.
+    fn refresh_bans(&mut self, now: Instant) {
+        self.bans_checked = Some(now);
+        if let Some(line) = self.chat_shadowbans.refresh() {
+            (self.log)(&line);
+        }
+        if let Some(line) = self.ip_bans.refresh() {
+            (self.log)(&line);
+            self.close_banned(now);
+        }
+    }
+
+    /// Closes every connection from a banned address without a word to it: the server only stops
+    /// answering, and its game's other members see it lose its connection. The connections closed.
+    fn close_banned(&mut self, now: Instant) -> usize {
+        let banned: Vec<u32> =
+            self.connections.iter().filter(|(_, connection)| self.ip_bans.contains(connection.addr.ip())).map(|(&id, _)| id).collect();
+        for &id in &banned {
+            self.leave_game(id, leave::LOST_CONNECTION, now);
+            if let Some(connection) = self.connections.remove(&id) {
+                self.by_addr.remove(&connection.addr);
+                (self.log)(&format!("connection {id} from {} closed: its address is banned", connection.addr));
+            }
+        }
+        banned.len()
+    }
+
+    /// The moderation panel's request (PC port addition), answered on its channel.
+    pub fn moderate(&mut self, request: panel::Request, now: Instant) {
+        match request {
+            panel::Request::View(reply) => {
+                let _ = reply.send(self.moderation_view(now));
+            }
+            panel::Request::Act(action, reply) => {
+                let outcome = self.moderation_action(action, now);
+                let _ = reply.send(outcome);
+            }
+        }
+    }
+
+    /// The signed-in players, by name, and the bans in force.
+    fn moderation_view(&self, now: Instant) -> panel::View {
+        let mut players: Vec<panel::Player> = self
+            .connections
+            .values()
+            .filter_map(|connection| {
+                let user = connection.user.as_ref()?;
+                Some(panel::Player {
+                    name: user.name.clone(),
+                    address: moderation::address(connection.addr.ip()),
+                    version: user.version.clone(),
+                    game: user.game.map(|game| (game, self.is_host(game, user.id))),
+                    online: now.saturating_duration_since(connection.opened),
+                    chat_shadowbanned: self.chat_shadowbans.contains(connection.addr.ip()),
+                })
+            })
+            .collect();
+        players.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()).then(a.address.cmp(&b.address)));
+        let bans = |list: &BanList| -> Vec<(IpAddr, String)> { list.iter().map(|(address, name)| (address, name.to_owned())).collect() };
+        panel::View { players, games: self.games.len(), chat_shadowbans: bans(&self.chat_shadowbans), ip_bans: bans(&self.ip_bans) }
+    }
+
+    /// Does what the panel asks: what came of it, for the page. A list's file edited by hand since
+    /// it was last read is read first, so the action does not write over the edit.
+    fn moderation_action(&mut self, action: panel::Action, now: Instant) -> String {
+        self.refresh_bans(now);
+        let mut outcome = Vec::new();
+        match action {
+            panel::Action::ChatShadowban(players) => {
+                for (address, name) in players {
+                    let written = self.chat_shadowbans.insert(address, &name);
+                    outcome.push(self.moderated(
+                        written,
+                        format!("{name} ({address}) is chat-shadowbanned"),
+                        format!("{name} ({address}) was chat-shadowbanned already."),
+                        moderation::CHAT_SHADOWBANS_FILE,
+                    ));
+                }
+            }
+            panel::Action::IpBan(players) => {
+                for (address, name) in players {
+                    let written = self.ip_bans.insert(address, &name);
+                    outcome.push(self.moderated(
+                        written,
+                        format!("{name} ({address}) is IP-banned"),
+                        format!("{name} ({address}) was IP-banned already."),
+                        moderation::IP_BANS_FILE,
+                    ));
+                }
+                match self.close_banned(now) {
+                    0 => {}
+                    1 => outcome.push("1 connection closed.".into()),
+                    closed => outcome.push(format!("{closed} connections closed.")),
+                }
+            }
+            panel::Action::Lift { chat, ip } => {
+                for address in chat {
+                    outcome.push(match self.chat_shadowbans.remove(address) {
+                        Some((name, written)) => self.moderated(
+                            Some(written),
+                            format!("The chat shadowban on {name} ({address}) is lifted"),
+                            String::new(),
+                            moderation::CHAT_SHADOWBANS_FILE,
+                        ),
+                        None => format!("{address} was not chat-shadowbanned."),
+                    });
+                }
+                for address in ip {
+                    outcome.push(match self.ip_bans.remove(address) {
+                        Some((name, written)) => {
+                            self.moderated(Some(written), format!("The IP ban on {name} ({address}) is lifted"), String::new(), moderation::IP_BANS_FILE)
+                        }
+                        None => format!("{address} was not IP-banned."),
+                    });
+                }
+            }
+        }
+        outcome.join(" ")
+    }
+
+    /// A ban's or lift's outcome for the page, logged when it changed a list: `unchanged` when
+    /// there was nothing to change; when its file could not be written, the change holds until the
+    /// server stops.
+    fn moderated(&mut self, written: Option<std::io::Result<()>>, change: String, unchanged: String, file: &str) -> String {
+        match written {
+            None => unchanged,
+            Some(Ok(())) => {
+                (self.log)(&format!("moderation panel: {change}"));
+                format!("{change}.")
+            }
+            Some(Err(error)) => {
+                (self.log)(&format!("moderation panel: {change} until the server stops: {file} could not be written ({error})"));
+                format!("{change} until the server stops: {file} could not be written ({error}).")
+            }
+        }
+    }
 }
 
 /// How long a member may send neither a replay frame nor `Busy` before it is kicked.
 const INACTIVITY: Duration = Duration::from_secs(2);
+
+/// How often the ban lists' files are looked at for changes made by hand.
+const BAN_CHECK: Duration = Duration::from_secs(1);
 
 /// How often the server prints its player, game and traffic counts.
 const STATUS_INTERVAL: Duration = Duration::from_secs(60);
@@ -1359,6 +1593,16 @@ pub fn run(config: &ServerConfig) -> std::io::Result<()> {
         format!("word list {path}: {} words", words.len())
     });
     core.set_words(words);
+    let folder = moderation::folder();
+    let mut chat_shadowbans = BanList::from_file(folder.join(moderation::CHAT_SHADOWBANS_FILE));
+    let mut ip_bans = BanList::from_file(folder.join(moderation::IP_BANS_FILE));
+    for list in [&mut chat_shadowbans, &mut ip_bans] {
+        let read = list.refresh();
+        let path = list.path().map(|path| path.display().to_string()).unwrap_or_default();
+        console.line(&read.unwrap_or_else(|| format!("{path}: no bans")));
+    }
+    core.set_bans(chat_shadowbans, ip_bans);
+    let panel = start_panel(config.bind, &folder, &console);
     let mut buffer = [0_u8; 2048];
     let mut last_status = Instant::now();
     let mut traffic = Traffic::default();
@@ -1381,6 +1625,11 @@ pub fn run(config: &ServerConfig) -> std::io::Result<()> {
         }
         let now = Instant::now();
         core.update(now);
+        if let Some(requests) = &panel {
+            while let Ok(request) = requests.try_recv() {
+                core.moderate(request, now);
+            }
+        }
         for (addr, datagram) in core.take_outgoing() {
             traffic.sent(datagram.len());
             // A send that fails (an unreachable peer) is a lost datagram like any other.
@@ -1395,6 +1644,55 @@ pub fn run(config: &ServerConfig) -> std::io::Result<()> {
         if !received {
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+}
+
+/// Opens the moderation panel at the server's address when `server-config.json` names its port
+/// and `moderation-key.txt` holds a key: the requests it sends the server's loop.
+fn start_panel(bind: SocketAddr, folder: &Path, console: &Console) -> Option<std::sync::mpsc::Receiver<panel::Request>> {
+    let config = folder.join(moderation::CONFIG_FILE);
+    let port = match moderation::panel_port(&config) {
+        Ok(Some(port)) => port,
+        Ok(None) => {
+            console.line(&format!("moderation panel: off, as {} names no moderation_panel_port", config.display()));
+            return None;
+        }
+        Err(why) => {
+            console.line(&format!("moderation panel: off, as {why}"));
+            return None;
+        }
+    };
+    let key = match PanelKey::read(&folder.join(moderation::KEY_FILE)) {
+        Ok(key) => key,
+        Err(why) => {
+            console.line(&format!("moderation panel: off, as {why}"));
+            return None;
+        }
+    };
+    let (requests, receiver) = std::sync::mpsc::channel();
+    let log = console.clone();
+    match panel::start(SocketAddr::new(bind.ip(), port), key, requests, Arc::new(move |line: &str| log.line(line))) {
+        Ok(address) => {
+            console.line(&format!("moderation panel on http://{address}{}?key=<the key in {}>", panel::PATH, moderation::KEY_FILE));
+            Some(receiver)
+        }
+        Err(error) => {
+            console.line(&format!("moderation panel: off, as port {port} could not be opened ({error})"));
+            None
+        }
+    }
+}
+
+/// Where the server keeps a file of its own (`badwords.txt`, `server-config.json`): beside its
+/// executable or, when only the working directory holds the file, there.
+#[must_use]
+pub fn server_file(name: &str) -> PathBuf {
+    let beside = std::env::current_exe().ok().and_then(|executable| Some(executable.parent()?.join(name)));
+    let working = std::env::current_dir().ok().map(|directory| directory.join(name));
+    match (beside, working) {
+        (Some(beside), Some(working)) if !beside.is_file() && working.is_file() => working,
+        (Some(beside), _) => beside,
+        (None, working) => working.unwrap_or_else(|| PathBuf::from(name)),
     }
 }
 

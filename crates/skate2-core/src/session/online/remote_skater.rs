@@ -42,6 +42,10 @@ use std::sync::{Arc, Mutex};
 const CHARACTER_VERSION: u8 = 1;
 /// Frames kept behind the one shown.
 const KEPT_BEHIND: u32 = 120;
+/// The most frames kept, the oldest going first: ten seconds of a sender's ticks, past any lag
+/// of the moment shown behind the newest (it reaches the newest at once after a hold). Frames
+/// stamped far ahead of the sender's ticks are never shown, and would otherwise pile up.
+const KEPT_FRAMES: usize = 600;
 /// Arrivals the playout follows: three seconds of a sender's frames.
 const ARRIVALS: usize = 180;
 /// Ticks added to the late arrivals' delay.
@@ -159,7 +163,9 @@ impl Character {
             return Err(format!("character format {version}"));
         }
         let mut reader = Reader::new(body);
-        let catalog = Catalog::get(&mut reader, mounts, vault)?;
+        // `encode_character` sends one look, palette and rig; a message with more is refused
+        // before any of them loads.
+        let catalog = Catalog::get_at_most(&mut reader, mounts, vault, [1, 1, 1])?;
         if reader.offset != body.len() {
             return Err("trailing character data".into());
         }
@@ -578,6 +584,13 @@ impl RemoteSkater {
         self.shown().is_some()
     }
 
+    /// Shows the skater no more until its frames come again, as when they stop: its owner left
+    /// for where this game sees nothing of it.
+    pub(super) fn hide(&mut self) {
+        self.last_arrival = None;
+        self.stale = true;
+    }
+
     /// A frame arrived on `local_tick`, the last of its run when `run_end`. While this console's
     /// ticks are held (`paced` false: a travel, a load, a sync point) its arrival says nothing of
     /// when frames come, and the playout does not count it.
@@ -601,6 +614,9 @@ impl RemoteSkater {
             self.teleports += 1;
         }
         self.frames.insert(frame.tick, frame);
+        while self.frames.len() > KEPT_FRAMES {
+            self.frames.pop_first();
+        }
         self.last_arrival = Some(local_tick);
     }
 
@@ -744,6 +760,7 @@ impl RemoteSkater {
             ghosted: restore.opacity.ghosted,
             entity_type: 0x122,
             players_recipe: false,
+            lobby_ghost: false,
         })
     }
 
@@ -963,6 +980,22 @@ mod tests {
             }
         }
         assert_eq!(skater.playout.allowance, 3);
+    }
+
+    #[test]
+    fn a_hold_keeps_the_newest_frames_and_stamped_ones_stay_bounded() {
+        let mut skater = RemoteSkater::new(1, 1);
+        // Half a minute of a sender's frames while this console's ticks are held.
+        for tick in 0..1800 {
+            skater.receive(0, posed(tick, 0.0), false, tick % 3 == 2);
+        }
+        assert_eq!(skater.frames.len(), KEPT_FRAMES);
+        assert_eq!(skater.frames.keys().next(), Some(&(1800 - u32::try_from(KEPT_FRAMES).unwrap())));
+        assert_eq!(skater.frames.keys().next_back(), Some(&1799));
+        for tick in 0..10_000 {
+            skater.receive(1, posed(u32::MAX - tick, 0.0), true, false);
+        }
+        assert_eq!(skater.frames.len(), KEPT_FRAMES);
     }
 
     fn frame(tick: u32, camera: Vec<f32>) -> NetFrame {

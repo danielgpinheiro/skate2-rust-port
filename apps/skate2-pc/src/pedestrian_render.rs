@@ -30,6 +30,9 @@ pub(crate) struct PedestrianRender{
     opacity:BTreeMap<EntityKey,skate2_core::LivingWorldOpacityState>,
     /// Uploaded recipe textures by original asset ID, shared by every mesh and LOD.
     textures:BTreeMap<u64,(String,GpuTexture)>,
+    /// A crowd imposter target's no-sim pedestrian keeps the LOD it was made with: it is in
+    /// no render view that would switch it.
+    fixed_lod:Option<u8>,
 }
 /// The retained upload for this asset ID, unless the ID now names another texture.
 fn cached_texture(cache:&mut BTreeMap<u64,(String,GpuTexture)>,id:u64,name:&str,
@@ -42,7 +45,10 @@ fn cached_texture(cache:&mut BTreeMap<u64,(String,GpuTexture)>,id:u64,name:&str,
 impl PedestrianRender{
     pub(crate) fn new(mounts:Arc<MountSet>,environment:Arc<EnvironmentLighting>)->Self{
         Self{mounts,environment,retained:Vec::new(),inactive_lod_objects:BTreeMap::new(),
-            opacity:BTreeMap::new(),textures:BTreeMap::new()}
+            opacity:BTreeMap::new(),textures:BTreeMap::new(),fixed_lod:None}
+    }
+    pub(crate) fn crowd_target(mounts:Arc<MountSet>,environment:Arc<EnvironmentLighting>)->Self{
+        Self{fixed_lod:Some(0),..Self::new(mounts,environment)}
     }
     /// Objects remain in GpuScene for normal sorting and shadow admission.
     /// The next frame recovers only this consumer's suffix, preserving buffers.
@@ -67,7 +73,7 @@ impl PedestrianRender{
             // LivingWorldPresentation::DoSimRestore 0x82813a90's local-to-world, else the tick's.
             let restored=restore.and_then(|restore|restore.pedestrian(visual.entity_id));
             let placement=restored.map_or_else(||visual.placement(),|transform|visual.placement_at(transform));
-            let selected_lod=visual.select_geometry_lod(camera.camera,&placement)?;
+            let selected_lod=match self.fixed_lod {Some(lod)=>lod,None=>visual.select_geometry_lod(camera.camera,&placement)?};
             if restored.is_some(){visual.publish_at(&placement)?;}
             let entity_key=(visual.entity_id,visual.recipe_id,Arc::as_ptr(&visual.palette) as usize);
             let opacity=self.opacity.entry(entity_key).or_insert_with(||

@@ -32,6 +32,8 @@ pub(crate) trait SelectedSessionTerrainSlot {
     ) -> Result<bool, SelectedSessionTerrainError>;
     fn try_update_focus(&mut self, position: [f32; 3]) -> Result<(), SelectedSessionTerrainError>;
     fn try_prepare_teleport(&mut self, position: [f32; 3]) -> Result<bool, SelectedSessionTerrainError>;
+    fn landable(&self, position: [f32; 3]) -> Result<bool, SelectedSessionTerrainError>;
+    fn focus_position(&self) -> Option<[f32; 3]>;
     fn try_set_online_area(&mut self, area: Option<(&str, [f32; 3])>) -> Result<(), SelectedSessionTerrainError>;
     fn try_focus_loaded(&self) -> Result<bool, SelectedSessionTerrainError>;
     fn replay_focus_status(&self)->Result<crate::streaming::replay_focus::Status,SelectedSessionTerrainError>;
@@ -64,6 +66,12 @@ impl<E: WorldStreamEffects> SelectedSessionTerrainSlot for SelectedSessionTerrai
     }
     fn try_prepare_teleport(&mut self, position: [f32; 3]) -> Result<bool, SelectedSessionTerrainError> {
         SelectedSessionTerrain::try_prepare_teleport(self, position)
+    }
+    fn landable(&self, position: [f32; 3]) -> Result<bool, SelectedSessionTerrainError> {
+        SelectedSessionTerrain::landable(self, position)
+    }
+    fn focus_position(&self) -> Option<[f32; 3]> {
+        SelectedSessionTerrain::focus_position(self)
     }
     fn try_set_online_area(&mut self, area: Option<(&str, [f32; 3])>) -> Result<(), SelectedSessionTerrainError> {
         SelectedSessionTerrain::try_set_online_area(self, area)

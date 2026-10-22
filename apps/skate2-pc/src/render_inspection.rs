@@ -480,6 +480,8 @@ impl RenderWindowClient for Inspection {
             postfx: None,
             world_ui:None,
             particles: None,
+            crowd: Default::default(),
+            deck_ao: None,
             visual_indicators: None,
             online_names: None,
             chase_arrows: None,

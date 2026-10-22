@@ -215,9 +215,10 @@ when they arrive.
 - Not ported: the world-shadow pass (`m_pWorldShadowMap`,
   `CalculateWorldShadow`) and character receivers (`CSM_ShadowMap_Self_PS`),
   because character lighting is not ported; the NIS / front-end /
-  loose-world variants; `PostFX::RenderAOBoxes` 0x828465b0 (the deck AO box
+  loose-world variants. `PostFX::RenderAOBoxes` 0x828465b0 (the deck AO box
   under each skater, a post-FX pass: multiplicative `m_pTex_DeckAO` projected
-  by `CalculateDeckShadowMatrix`), which is separate from the sun shadows.
+  by `CalculateDeckShadowMatrix`), separate from the sun shadows, was ported
+  later (2026-10-21, docs/GRAPHICS.md "Deck AO").
 
 ## 6. Tests added
 

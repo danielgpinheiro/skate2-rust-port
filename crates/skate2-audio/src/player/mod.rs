@@ -26,6 +26,7 @@ use crate::rwac::{AudioCore, PluginRef};
 use crate::splicer::{SpliceId, SpliceManager, SplicePlayParams, SpliceUpdateParams};
 use crate::vault::Vault;
 use crate::vmx::Vec3;
+use crate::world::crowd::{CrowdEnv, CrowdManager};
 use clothing::Clothing;
 use contacts::Contacts;
 use cracks::Cracks;
@@ -160,9 +161,24 @@ pub struct SfxCtx<'a> {
     pub npc_wheel_type: u32,
     /// `AudioSystem::PlayCollisionSound` requests, applied to the collision manager in order.
     pub collisions: &'a mut Vec<CollisionInfo>,
+    /// `AudioSystem::PlayCrowdSound`'s crowd manager (`mStateManagers[7]`) and what it reads,
+    /// during the passes that can cheer.
+    pub crowds: Option<&'a mut CrowdManager>,
+    pub crowd_env: Option<CrowdEnv<'a>>,
+    /// `AudioSystem::mCondScore - mCondPrevScore`.
+    pub cond_score_delta: i32,
 }
 
 impl SfxCtx<'_> {
+    /// `AudioSystem::PlayCrowdSound` 0x824e69e0: `CSTATEMGR_Crowd::PlayCrowdSound` at once.
+    pub fn play_crowd_sound(&mut self, skater_id: i32, score: i32, wiped_out_score: i32, local: bool) {
+        let Some(env) = self.crowd_env else { return };
+        let Some(crowds) = self.crowds.take() else { return };
+        let inputs = env.inputs(skater_id, self.vault);
+        crowds.play_crowd_sound(skater_id, score, wiped_out_score, local, &inputs, env.banks_loaded, self);
+        self.crowds = Some(crowds);
+    }
+
     pub fn set_input(&mut self, io: Option<DMixIoId>, index: usize, value: i32) {
         if let Some(io) = io {
             self.map.set_input(io, index, value);
@@ -486,7 +502,7 @@ impl PlayerManager {
         state.board_pos.update_params(t, board_refs, mics, &mut self.shared, ctx.map);
         state.skateboard.update_params(t, &state.physics, ctx);
         let io = state.contacts_io;
-        state.contacts.update_params(t, &state.physics, io, ctx);
+        state.contacts.update_params(t, &state.physics, skater, state.state_data.array_index, io, ctx);
         state.rail.update_params(t, &state.physics, ctx);
         state.cracks.update_params(&state.physics, ctx);
         state.tricks.update_params(t, &state.physics, ctx);

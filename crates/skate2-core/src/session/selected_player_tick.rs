@@ -891,6 +891,12 @@ impl SelectedPlayerTick {
             recipes.present_pedestrian_animation(world, cvars, &self.hand_tokens).map_err(|error|
                 E::LivingWorld(Box::new(crate::selected_living_world_dmo::SelectedLivingWorldDmoError::Pedestrians(error))))?;
         }
+        // LivingWorldPresentation::Update's UpdateNoSimPedestrians, then SyncLivingWorldAnim's
+        // EvalNoSimPedestrians, for the crowd's imposter targets.
+        if let Some(recipes) = living_world_recipes.as_mut() {
+            recipes.present_crowd(crate::physics::PHYSICS_STEP_SECONDS, cvars).map_err(|error|
+                E::LivingWorld(Box::new(crate::selected_living_world_dmo::SelectedLivingWorldDmoError::Pedestrians(error))))?;
+        }
         if let Some(submit_mask) = self.camera_subsequence {
             // The admitted profile above and queued-mask check establish mask3.
             // Native camera gate8289fc5c is updateMask & submitMask, not bit1.

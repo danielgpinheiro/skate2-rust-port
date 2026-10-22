@@ -252,12 +252,14 @@ pub struct MusicVolumeInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VolumeStatusId(u32);
 
-/// What `SFXObj_Reverb` reads through a status pointer: its key, distance and volume position.
+/// What `SFXObj_Reverb` reads through a status pointer: its key, distance and volume position;
+/// and the volume's identifier and own key (`pVolume`, `None` without one).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VolumeStatusView {
     pub key: u64,
     pub distance: f32,
     pub pos: [f32; 3],
+    pub volume: Option<(u32, u64)>,
 }
 
 /// The audio core, AEMS, the mixer, the vault and `rw::math::Random` the system works with.
@@ -302,6 +304,15 @@ fn convert_distance_to_volume(distance: f32, kind: i32) -> f32 {
 /// The collection key of a `RefSpec` (bytes 8..16).
 fn ref_spec_key(bytes: &[u8]) -> u64 {
     u64::from_be_bytes(bytes[8..16].try_into().expect("eight bytes"))
+}
+
+/// `aud_emitter::crowd_aems_id` 0x82550250: the crowd group a crowd volume plays.
+const CROWD_AEMS_ID: u64 = 0x0B59_50C0_1840_14C2;
+
+/// `aud_emitter::crowd_aems_id` of an emitter collection (0 from `DefaultDataArea`).
+#[must_use]
+pub fn crowd_aems_id(key: u64, vault: &Vault) -> i32 {
+    vault.i32(Collection::new(AUD_EMITTER, key), CROWD_AEMS_ID)
 }
 
 /// `aud_emitter::reverbType` 0x824e7f10: the `aud_reverb` collection of an emitter collection.
@@ -502,6 +513,17 @@ impl Sk8EmitterSystem {
     /// `AudioAssetManager::Update` 0x82a7a900, at the start of `AudioSystem::Update`.
     pub fn update_assets(&mut self, aems: &mut Aems, core: &mut AudioCore) {
         self.assets.update(aems, core);
+    }
+
+    /// The `AudioAssetManager` singleton, whose fixed asset banks also take the traffic and crowd
+    /// banks.
+    pub fn assets_mut(&mut self) -> &mut AudioAssetManager {
+        &mut self.assets
+    }
+
+    #[must_use]
+    pub fn assets(&self) -> &AudioAssetManager {
+        &self.assets
     }
 
     /// `GetVolumeType` 0x824f8248.
@@ -1039,8 +1061,9 @@ impl Sk8EmitterSystem {
     #[must_use]
     pub fn volume_status(&self, id: VolumeStatusId) -> Option<VolumeStatusView> {
         let status = self.volume_statuses.iter().chain(self.freed.iter().rev()).find(|status| status.id == id.0)?;
-        let pos = self.volume(status.volume).map_or([0.0; 3], |volume| volume.pos);
-        Some(VolumeStatusView { key: status.key, distance: status.distance, pos })
+        let volume = self.volume(status.volume);
+        let pos = volume.map_or([0.0; 3], |volume| volume.pos);
+        Some(VolumeStatusView { key: status.key, distance: status.distance, pos, volume: volume.map(|volume| (volume.identifier, volume.key)) })
     }
 
     /// `GetVolumes` 0x82a81b58: up to `count` statuses of `kind`, in list order.

@@ -15,15 +15,25 @@ pub struct PcDisplaySettings {
     pub fps_counter: bool,
     /// A borderless window over the whole monitor (Alt+Enter toggles it as well).
     pub fullscreen: bool,
+    /// The 3D scene's size in percent of the window, from `RESOLUTION_SCALES` in steps of
+    /// `RESOLUTION_SCALE_STEP`; the HUD and menus keep the window's.
+    pub resolution_scale: u8,
+    /// Each frame waits for the display's refresh, so none tears; off, frames show at once.
+    pub vsync: bool,
 }
 impl Default for PcDisplaySettings {
     fn default() -> Self {
-        Self { postfx: true, fisheye: true, frame_rate_cap: FrameRateCap::RefreshRate, fps_counter: false, fullscreen: false }
+        Self { postfx: true, fisheye: true, frame_rate_cap: FrameRateCap::RefreshRate, fps_counter: false, fullscreen: false,
+            resolution_scale: 100, vsync: true }
     }
 }
+/// The resolution scales Display Settings offers, in percent.
+pub const RESOLUTION_SCALES: std::ops::RangeInclusive<u8> = 50..=200;
+pub const RESOLUTION_SCALE_STEP: u8 = 10;
 /// The most frames presented a second: no cap; 60, the original's rate (`RenderMan::Render`
 /// 0x82858360 presents every refresh of the 60 Hz display outside its 30 Hz mode); 120; or one
-/// each refresh.
+/// each refresh. Before VSync had its own setting (version 7), Refresh Rate was the only cap
+/// that waited for the refresh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameRateCap {
     Unlimited = 0,
@@ -610,9 +620,11 @@ impl SkaterProfile {
                 if read32(&leaf, 0)? != name_hash("SK82_PC::DisplaySettings") { continue; }
                 // Version 1 predates VSync and reads as Refresh Rate. Version 2's VSync Off,
                 // Half and On read as Unlimited, 60 and Refresh Rate. Versions before 4 have no
-                // frame rate counter, which reads as off, and before 5 no fullscreen: windowed.
+                // frame rate counter, which reads as off, before 5 no fullscreen: windowed, before
+                // 6 no resolution scale: 100%, and before 7 no VSync, which the Refresh Rate cap
+                // alone meant.
                 let version = read32(&leaf, 4)?;
-                if !matches!(version, 1..=5) { return Err(ProfileError("unsupported PC display settings version")); }
+                if !matches!(version, 1..=7) { return Err(ProfileError("unsupported PC display settings version")); }
                 let mut r = Reader { bytes: &leaf[16..], pos: 0 };
                 let mut boolean = || match r.tuple()? {
                     [0] => Ok(false), [1] => Ok(true),
@@ -623,8 +635,8 @@ impl SkaterProfile {
                     match (version, r.tuple()?) {
                         (_, [0]) => FrameRateCap::Unlimited,
                         (_, [1]) => FrameRateCap::Fps60,
-                        (3..=5, [2]) => FrameRateCap::Fps120,
-                        (2, [2]) | (3..=5, [3]) => FrameRateCap::RefreshRate,
+                        (3..=7, [2]) => FrameRateCap::Fps120,
+                        (2, [2]) | (3..=7, [3]) => FrameRateCap::RefreshRate,
                         _ => return Err(ProfileError("invalid PC frame rate cap")),
                     }
                 };
@@ -632,25 +644,38 @@ impl SkaterProfile {
                     [0] => false, [1] => true,
                     _ => return Err(ProfileError("invalid PC display setting boolean")),
                 };
-                let fullscreen = version == 5 && match r.tuple()? {
+                let fullscreen = version >= 5 && match r.tuple()? {
                     [0] => false, [1] => true,
                     _ => return Err(ProfileError("invalid PC display setting boolean")),
                 };
-                return Ok(PcDisplaySettings { postfx, fisheye, frame_rate_cap, fps_counter, fullscreen });
+                let resolution_scale = if version >= 6 {
+                    match r.tuple()? {
+                        [scale] if RESOLUTION_SCALES.contains(scale) && scale % RESOLUTION_SCALE_STEP == 0 => *scale,
+                        _ => return Err(ProfileError("invalid PC resolution scale")),
+                    }
+                } else { 100 };
+                let vsync = if version >= 7 {
+                    match r.tuple()? {
+                        [0] => false, [1] => true,
+                        _ => return Err(ProfileError("invalid PC display setting boolean")),
+                    }
+                } else { frame_rate_cap == FrameRateCap::RefreshRate };
+                return Ok(PcDisplaySettings { postfx, fisheye, frame_rate_cap, fps_counter, fullscreen, resolution_scale, vsync });
             }
         }
         Ok(PcDisplaySettings::default())
     }
     pub fn set_display_settings(&mut self, settings: PcDisplaySettings) -> Result<()> {
         let id = name_hash("SK82_PC::DisplaySettings");
-        let leaf = leaf_chunk(id, 5, &[vec![u8::from(settings.postfx)], vec![u8::from(settings.fisheye)],
-            vec![settings.frame_rate_cap as u8], vec![u8::from(settings.fps_counter)], vec![u8::from(settings.fullscreen)]]);
+        let leaf = leaf_chunk(id, 7, &[vec![u8::from(settings.postfx)], vec![u8::from(settings.fisheye)],
+            vec![settings.frame_rate_cap as u8], vec![u8::from(settings.fps_counter)], vec![u8::from(settings.fullscreen)],
+            vec![settings.resolution_scale], vec![u8::from(settings.vsync)]]);
         for chunk in self.chunks.iter_mut().skip(1) {
             if read32(chunk, 0)? != name_hash("SK82_PC") { continue; }
             let mut children = split_chunks(&chunk[16..])?;
             if let Some(old) = children.iter_mut().find(|c| read32(c, 0).ok() == Some(id)) {
                 // Validate the version before modifying an existing extension.
-                if !matches!(read32(old, 4)?, 1..=5) { return Err(ProfileError("unsupported PC display settings version")); }
+                if !matches!(read32(old, 4)?, 1..=7) { return Err(ProfileError("unsupported PC display settings version")); }
                 *old = leaf;
             } else { children.push(leaf); }
             *chunk = nested_chunk(name_hash("SK82_PC"), &children.concat());
@@ -1033,7 +1058,8 @@ mod display_tests {
         let unknown = nested_chunk(name_hash("UnimplementedCareer"), &leaf_chunk(97, 17, &[vec![9,8,7,6]]));
         profile.chunks.push(unknown.clone());
         for (postfx, frame_rate_cap) in [(false, FrameRateCap::Unlimited), (true, FrameRateCap::Fps60), (false, FrameRateCap::Fps120)] { for fisheye in [true, false] {
-            let expected = PcDisplaySettings { postfx, fisheye, frame_rate_cap, fps_counter: fisheye, fullscreen: postfx };
+            let expected = PcDisplaySettings { postfx, fisheye, frame_rate_cap, fps_counter: fisheye, fullscreen: postfx,
+                resolution_scale: if fisheye { 200 } else { 50 }, vsync: !postfx };
             profile.set_display_settings(expected).unwrap();
             profile.set_cac_record(&record).unwrap();
             profile = SkaterProfile::parse(&profile.encode().unwrap()).unwrap();
@@ -1053,15 +1079,32 @@ mod display_tests {
             profile
         };
         assert_eq!(saved(1, &[vec![0], vec![1]]).display_settings().unwrap(),
-            PcDisplaySettings { postfx: false, fisheye: true, frame_rate_cap: FrameRateCap::RefreshRate, fps_counter: false, fullscreen: false });
+            PcDisplaySettings { postfx: false, fisheye: true, frame_rate_cap: FrameRateCap::RefreshRate, fps_counter: false, fullscreen: false,
+                resolution_scale: 100, vsync: true });
         for (vsync, frame_rate_cap) in [(0, FrameRateCap::Unlimited), (1, FrameRateCap::Fps60), (2, FrameRateCap::RefreshRate)] {
             assert_eq!(saved(2, &[vec![1], vec![1], vec![vsync]]).display_settings().unwrap().frame_rate_cap, frame_rate_cap);
         }
         assert!(saved(2, &[vec![1], vec![1], vec![3]]).display_settings().is_err());
         assert_eq!(saved(3, &[vec![1], vec![0], vec![2]]).display_settings().unwrap(),
-            PcDisplaySettings { postfx: true, fisheye: false, frame_rate_cap: FrameRateCap::Fps120, fps_counter: false, fullscreen: false });
+            PcDisplaySettings { postfx: true, fisheye: false, frame_rate_cap: FrameRateCap::Fps120, fps_counter: false, fullscreen: false,
+                resolution_scale: 100, vsync: false });
         assert_eq!(saved(4, &[vec![1], vec![0], vec![2], vec![1]]).display_settings().unwrap(),
-            PcDisplaySettings { postfx: true, fisheye: false, frame_rate_cap: FrameRateCap::Fps120, fps_counter: true, fullscreen: false });
+            PcDisplaySettings { postfx: true, fisheye: false, frame_rate_cap: FrameRateCap::Fps120, fps_counter: true, fullscreen: false,
+                resolution_scale: 100, vsync: false });
+        assert_eq!(saved(5, &[vec![1], vec![1], vec![3], vec![0], vec![1]]).display_settings().unwrap(),
+            PcDisplaySettings { fullscreen: true, ..PcDisplaySettings::default() });
+        assert_eq!(saved(6, &[vec![1], vec![1], vec![3], vec![0], vec![1], vec![140]]).display_settings().unwrap(),
+            PcDisplaySettings { fullscreen: true, resolution_scale: 140, ..PcDisplaySettings::default() });
+        for scale in [0, 40, 145, 210] {
+            assert!(saved(6, &[vec![1], vec![1], vec![3], vec![0], vec![0], vec![scale]]).display_settings().is_err());
+        }
+        // Before version 7 only the Refresh Rate cap waited for the refresh; from 7 VSync is its own.
+        assert!(!saved(6, &[vec![1], vec![1], vec![1], vec![0], vec![0], vec![100]]).display_settings().unwrap().vsync);
+        assert_eq!(saved(7, &[vec![1], vec![1], vec![3], vec![0], vec![0], vec![100], vec![0]]).display_settings().unwrap(),
+            PcDisplaySettings { vsync: false, ..PcDisplaySettings::default() });
+        assert_eq!(saved(7, &[vec![1], vec![1], vec![2], vec![0], vec![0], vec![100], vec![1]]).display_settings().unwrap(),
+            PcDisplaySettings { frame_rate_cap: FrameRateCap::Fps120, ..PcDisplaySettings::default() });
+        assert!(saved(7, &[vec![1], vec![1], vec![3], vec![0], vec![0], vec![100], vec![2]]).display_settings().is_err());
         let mut profile = saved(2, &[vec![1], vec![1], vec![1]]);
         let capped = PcDisplaySettings { frame_rate_cap: FrameRateCap::Fps120, ..PcDisplaySettings::default() };
         profile.set_display_settings(capped).unwrap();

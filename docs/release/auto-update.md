@@ -15,6 +15,15 @@ only to a server of the same release.
   starts again now." The screen fades, the game closes, and the new version starts with the
   same arguments, in the same folder. On Linux the new version takes the old one's process, so
   whatever started the game (a terminal, Steam) still has it.
+- **After the update,** a player's first launch of the new release, once the main menu is up
+  with nothing over it, shows "Version 0.2.0": "Update Changelogs:" and each change in
+  `changelog.txt` under a dash, a blank line between them (as many as fit on the screen; past
+  that the last line says how many more), with OK, before any newer release is offered.
+  `config.json` then names the release as seen (`changelog_seen`), so it shows once, whatever
+  version the update came from and however the new release was put in place. A first install,
+  which has no `config.json` before the game folder is picked, records it without showing it,
+  and a `changelog.txt` without changes shows nothing. `skate2-pc --changelog` shows it at any
+  launch.
 - **No:** the game carries on. That version is offered again at the next start, or when the
   server refuses this version ("Your game doesn't match the server's version...").
 - **A failure** (no connection, a release that does not check out, a folder that cannot be
@@ -115,21 +124,24 @@ download a new release by hand.
 ## Each release
 
 1. Raise `version` in the workspace `Cargo.toml` (for example `0.1.0` to `0.2.0`).
-2. Build the game on Windows: `build-release.bat` (`target\release\skate2-pc.exe`). Its icon is
+2. Write the release's changes in `changelog.txt` at the repository's root, one per line: the
+   game adds the dash, and lines starting with `#` are left out. It is built into the game.
+   About ten short changes fit in the popup, fewer long ones.
+3. Build the game on Windows: `build-release.bat` (`target\release\skate2-pc.exe`). Its icon is
    `apps/skate2-pc/skate2.ico`, which the game's `build.rs` links into the executable.
-3. Build the Linux game and server from the same files, `release-secret.txt` and
+4. Build the Linux game and server from the same files, `release-secret.txt` and
    `release-repository.txt` included: `build-release-linux.bat` runs `build-release.sh` in WSL,
    or run `./build-release.sh` on Linux. Both land in `dist/linux` (`skate2-pc`,
    `skate2-server`). Setting the Linux build up: [linux.md](linux.md).
-4. Package and sign on Windows: `package-release.bat`. It writes
+5. Package and sign on Windows: `package-release.bat`. It writes
    `dist\skate2-windows-x64.zip`, `dist\skate2-linux-x64.zip`, `dist\latest-release.txt` and
    `dist\latest-release.txt.sig`, and refuses a program older than `Cargo.toml`: one built
    before the version changed would report the old version, and its players would be offered
    the same release at every start. The release tool can also be run by hand:
    `cargo run --release -p skate2-update --bin skate2-release -- pack|sign|public-key ...`.
-5. On GitHub, create a release tagged `v<version>` (for example `v0.2.0`), not a pre-release,
+6. On GitHub, create a release tagged `v<version>` (for example `v0.2.0`), not a pre-release,
    and upload the four files.
-6. Update the server: stop it, run `./skate2-server --update` (`./skate2-pc --update` when the
+7. Update the server: stop it, run `./skate2-server --update` (`./skate2-pc --update` when the
    game hosts), start it again. (Unzipping the new Linux zip over the old files works too.)
 
 Players get the update the next time they start the game. Until then the new server refuses

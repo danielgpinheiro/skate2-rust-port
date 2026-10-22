@@ -37,6 +37,13 @@ impl<T, C> SelectedLiveSession<T, C> {
         self.main_menu=Some(menu);
         Ok(())
     }
+    /// PC: the release's changes over the main menu once it stands idle, at a player's first
+    /// launch of the release.
+    pub fn show_changelog(&mut self, changelog: crate::ui::update_prompt::Changelog) {
+        if let Some(menu) = self.main_menu.as_mut() {
+            menu.changelog = Some(changelog);
+        }
+    }
     /// `ProfileBackEnd.mNewProfile` from the PC SKATER.P (see EditSkaterProfileStore).
     pub(super) fn profile_is_new()->Result<bool,SelectedLiveError>{
         let path=crate::edit_skater_profile::EditSkaterProfileStore::default_path().map_err(error)?;

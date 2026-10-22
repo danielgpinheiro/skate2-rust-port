@@ -100,6 +100,9 @@ pub(super) struct OnlineGame {
     /// In join order; the first is the game host peer.
     pub(super) players: Vec<OnlinePlayer>,
     pub(super) phase: Phase,
+    /// The members playing the challenge in progress, as the server last said: a player waiting
+    /// in its pre-game lobby watches them as ghosts (PC port addition).
+    pub(super) participants: Vec<u64>,
     remotes: BTreeMap<u64, RemoteSkater>,
     /// Recipes that arrived before the world could build them.
     recipes: BTreeMap<u64, Vec<u8>>,
@@ -189,6 +192,8 @@ pub(super) struct Online {
     nickname_prompt: Option<crate::ui::profile_name::Prompt>,
     /// `SKATE2_DIAGNOSTIC_ONLINE_CHAT` sent its line.
     diagnostic_chat_sent: bool,
+    /// The pause menu's Leave Challenge answered yes (PC port addition).
+    leave_challenge: bool,
 }
 
 impl Online {
@@ -252,6 +257,9 @@ const LOCATION: u64 = 0xF1C6_D5FA_4A23_951E;
 /// game slots past the SkaterManager's eight Actors, so none shares the local skater's (always 0)
 /// or an AI skater's.
 const REMOTE_AUDIO_IDS: u32 = 8;
+/// The most opacity a challenge's player shows with to a player waiting in its pre-game lobby
+/// (PC port addition).
+const LOBBY_GHOST_OPACITY: f32 = 0.4;
 
 impl<T, C> SelectedLiveSession<T, C> {
     /// Signs in with `online-config.json`'s nickname and server, unless already signed in or
@@ -349,7 +357,11 @@ impl<T, C> SelectedLiveSession<T, C> {
                     let tick = self.completed_frames;
                     // Net::PauseGame holds this console's ticks: an arrival then is not paced.
                     let paced = self.online.network_resumed;
-                    if let Some(remote) = self.online.game.as_mut().and_then(|game| game.remotes.get_mut(&user_id)) {
+                    // A round's player sees nothing of a member waiting in the pre-game lobby: the
+                    // server relays none of its frames, and one already on its way when the member
+                    // left the round is dropped.
+                    let waiting = self.online.round.is_some() && self.online.game.as_ref().is_some_and(|game| !game.participants.contains(&user_id));
+                    if !waiting && let Some(remote) = self.online.game.as_mut().and_then(|game| game.remotes.get_mut(&user_id)) {
                         remote.receive(tick, *frame, paced, run_end);
                     }
                 }
@@ -360,6 +372,9 @@ impl<T, C> SelectedLiveSession<T, C> {
                     }
                 }
             }
+        }
+        if std::mem::take(&mut self.online.leave_challenge) {
+            self.online_leave_challenge()?;
         }
         if self.online.game.as_ref().is_some_and(|game| game.entered) {
             self.online.event_log.update();
@@ -641,7 +656,7 @@ impl<T, C> SelectedLiveSession<T, C> {
                 }
             }
             ServerMessage::Lobbies(lobbies) => self.online_lobbies(&lobbies)?,
-            ServerMessage::GameJoined { game, slot, attributes, players, phase } => self.online_game_joined(game, slot, attributes, players, phase)?,
+            ServerMessage::GameJoined { game, slot, attributes, players, phase, participants } => self.online_game_joined(game, slot, attributes, players, phase, participants)?,
             ServerMessage::GameAttributes(attributes) => {
                 if !self.online_challenge_known(&attributes)? {
                     return self.online_unplayable(&format_args!("the game went to a challenge this build lacks ({:016x})", attributes.challenge_key));
@@ -689,6 +704,7 @@ impl<T, C> SelectedLiveSession<T, C> {
                 }
             }
             ServerMessage::Chat { user_id, text } => self.online_chat(user_id, &text),
+            ServerMessage::ChallengeLeave { user_id } => self.online_challenge_leave(user_id),
             message => trace(format_args!("unhandled {message:?}")),
         }
         Ok(())
@@ -696,7 +712,7 @@ impl<T, C> SelectedLiveSession<T, C> {
 
     /// `OnEvent(OE_GameJoined)` and `SetupGame` 0x82778530: the game's players, then the game's
     /// location once the front end's fade covers.
-    fn online_game_joined(&mut self, id: u32, slot: u8, attributes: GameAttributes, players: Vec<PlayerInfo>, phase: Phase) -> Result<(), SelectedLiveError> {
+    fn online_game_joined(&mut self, id: u32, slot: u8, attributes: GameAttributes, players: Vec<PlayerInfo>, phase: Phase, participants: Vec<u64>) -> Result<(), SelectedLiveError> {
         trace(format_args!("joined game {id} in slot {slot}: {attributes:?}, {} players, {phase:?}", players.len()));
         if !self.online_challenge_known(&attributes)? {
             return self.online_unplayable(&format_args!("game {id} is at a challenge this build lacks ({:016x})", attributes.challenge_key));
@@ -717,6 +733,7 @@ impl<T, C> SelectedLiveSession<T, C> {
             attributes,
             players: players.into_iter().map(|player| OnlinePlayer { user_id: player.user_id, slot: player.slot, name: player.name }).collect(),
             phase,
+            participants,
             remotes,
             recipes: BTreeMap::new(),
             announced: Vec::new(),
@@ -931,6 +948,7 @@ impl<T, C> SelectedLiveSession<T, C> {
         trace(format_args!("{name} left (reason {reason})"));
         let host_before = game.host();
         game.players.retain(|player| player.user_id != user_id);
+        game.participants.retain(|&participant| participant != user_id);
         game.remotes.remove(&user_id);
         game.recipes.remove(&user_id);
         game.announced.retain(|&announced| announced != user_id);
@@ -1194,7 +1212,9 @@ impl<T, C> SelectedLiveSession<T, C> {
     /// The remote skaters for the tick's visual snapshot, each named by the game's player whose
     /// skater it is (`SkaterPresEntity`'s constructor 0x827e5740 takes a non-empty name). Its
     /// index is the player's row on the leaderboard HUD: the round's table in a challenge, the
-    /// game's players on the lobby board.
+    /// game's players on the lobby board. A player waiting in the pre-game lobby watches the
+    /// challenge's players as ghosts (PC port addition), drawn as the ghost technique draws a
+    /// skater the camera comes close to.
     pub(super) fn online_visuals(&self) -> Vec<crate::SelectedSkaterVisual<'_>> {
         let Some(game) = self.online.game.as_ref() else { return Vec::new() };
         let round = self.online.round.as_ref();
@@ -1207,6 +1227,11 @@ impl<T, C> SelectedLiveSession<T, C> {
                     let index = round.and_then(|round| round.player_index(remote.user_id)).unwrap_or(row);
                     (!name.is_empty()).then(|| crate::SkaterNameTag { name: name.clone(), index: u8::try_from(index).unwrap_or(u8::MAX) })
                 });
+                if round.is_none() && game.participants.contains(&remote.user_id) {
+                    visual.opacity = visual.opacity.min(LOBBY_GHOST_OPACITY);
+                    visual.ghosted = true;
+                    visual.lobby_ghost = true;
+                }
                 Some(visual)
             })
             .collect()

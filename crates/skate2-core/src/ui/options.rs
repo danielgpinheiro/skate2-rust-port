@@ -4,12 +4,14 @@
 //! variant `OnMenuSelect` (0x826871a0) picks for the front end, a free skate game or any other
 //! game. In game the list leads with the Music Player (FE state 30). PC port addition: a
 //! Display Settings page after Video Settings holds the PC rows (PostFX, Fisheye, Frame Rate
-//! Cap, Frame Rate Counter, Fullscreen), saved in their own chunk, and an Online Settings page
-//! holds Show Lobby Chat, saved in `online-config.json`. Beside them the PC port calls Video
-//! Settings (`ID_GAMESETTINGS_VIDEO_SETTINGS`) Gameplay Settings, for its camera, HUD and
-//! subtitle rows.
+//! Cap, VSync, Resolution Scale, Frame Rate Counter, Fullscreen), saved in their own chunk, and
+//! an Online Settings page holds Show Lobby Chat, saved in `online-config.json`. Beside them the
+//! PC port calls Video Settings (`ID_GAMESETTINGS_VIDEO_SETTINGS`) Gameplay Settings, for its
+//! camera, HUD and subtitle rows.
 use super::pause_menu::PauseMenuInput;
-pub use skate2_formats::skater_profile::{FrameRateCap, PcDisplaySettings, ProfileSettings};
+pub use skate2_formats::skater_profile::{
+    FrameRateCap, PcDisplaySettings, ProfileSettings, RESOLUTION_SCALES, RESOLUTION_SCALE_STEP,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page {
@@ -50,6 +52,10 @@ pub enum Row {
     PostFx,
     Fisheye,
     FrameRateCap,
+    /// PC port addition: frames wait for the display's refresh.
+    VSync,
+    /// PC port addition: the 3D scene's size in percent of the window.
+    ResolutionScale,
     FpsCounter,
     Fullscreen,
     /// `eSk8FEGameOption_SubtitlesToggle`: the profile's `mSubtitles`.
@@ -75,9 +81,9 @@ impl Row {
                 "option"
             }
             Self::SfxVolume | Self::DialogueVolume | Self::MusicVolume => "slider",
-            Self::PostFx | Self::Fisheye | Self::FrameRateCap | Self::FpsCounter | Self::Fullscreen
-            | Self::Subtitles | Self::CameraAngle | Self::GrindTransparency | Self::MiniMap | Self::Hud
-            | Self::ShowLobbyChat => "selector",
+            Self::PostFx | Self::Fisheye | Self::FrameRateCap | Self::VSync | Self::ResolutionScale
+            | Self::FpsCounter | Self::Fullscreen | Self::Subtitles | Self::CameraAngle | Self::GrindTransparency
+            | Self::MiniMap | Self::Hud | Self::ShowLobbyChat => "selector",
         }
     }
     /// `gGameOptionsItems`' title id; the PC rows carry literal text.
@@ -95,6 +101,8 @@ impl Row {
             Self::PostFx => "PostFX",
             Self::Fisheye => "Fisheye",
             Self::FrameRateCap => "Frame Rate Cap",
+            Self::VSync => "VSync",
+            Self::ResolutionScale => "Resolution Scale",
             Self::FpsCounter => "Frame Rate Counter",
             Self::Fullscreen => "Fullscreen",
             Self::Subtitles => "ID_GAMESETTINGS_SUBTITLE_TOGGLE",
@@ -115,7 +123,15 @@ const AUDIO: &[Row] = &[Row::SfxVolume, Row::DialogueVolume, Row::MusicVolume];
 const VIDEO_MAIN_MENU: &[Row] = &[Row::Subtitles];
 const VIDEO_GAME: &[Row] = &[Row::CameraAngle, Row::GrindTransparency, Row::Subtitles];
 const VIDEO_FREESKATE: &[Row] = &[Row::CameraAngle, Row::GrindTransparency, Row::Subtitles, Row::MiniMap, Row::Hud];
-const DISPLAY: &[Row] = &[Row::PostFx, Row::Fisheye, Row::FrameRateCap, Row::FpsCounter, Row::Fullscreen];
+const DISPLAY: &[Row] = &[
+    Row::PostFx,
+    Row::Fisheye,
+    Row::FrameRateCap,
+    Row::VSync,
+    Row::ResolutionScale,
+    Row::FpsCounter,
+    Row::Fullscreen,
+];
 const ONLINE: &[Row] = &[Row::ShowLobbyChat];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -207,6 +223,11 @@ fn step_frame_rate_cap(value: FrameRateCap, forward: bool) -> FrameRateCap {
         [FrameRateCap::Unlimited, FrameRateCap::Fps60, FrameRateCap::Fps120, FrameRateCap::RefreshRate];
     let index = ORDER.iter().position(|&v| v == value).unwrap_or(3);
     ORDER[if forward { (index + 1) % 4 } else { (index + 3) % 4 }]
+}
+/// One step up or down, stopping at either end of `RESOLUTION_SCALES`.
+fn step_resolution_scale(value: u8, forward: bool) -> u8 {
+    let next = if forward { value.saturating_add(RESOLUTION_SCALE_STEP) } else { value.saturating_sub(RESOLUTION_SCALE_STEP) };
+    next.clamp(*RESOLUTION_SCALES.start(), *RESOLUTION_SCALES.end())
 }
 impl Controller {
     pub fn load(&mut self, values: PcDisplaySettings) {
@@ -356,9 +377,10 @@ impl Controller {
                 self.sounds.push(if input.right { "FE_SOUND_CORE_MUSIC_VOLUME_RIGHT" } else { "FE_SOUND_CORE_MUSIC_VOLUME_LEFT" });
                 &mut settings.music_volume
             }
-            Row::PostFx | Row::Fisheye | Row::FrameRateCap | Row::FpsCounter | Row::Fullscreen | Row::ShowLobbyChat => {
+            Row::PostFx | Row::Fisheye | Row::FrameRateCap | Row::VSync | Row::ResolutionScale | Row::FpsCounter
+            | Row::Fullscreen | Row::ShowLobbyChat => {
                 // The PC selectors sound core_nav_left/core_nav_right by key and, as
-                // Prev/NextValueCalc do, wrap past either end.
+                // Prev/NextValueCalc do, wrap past either end; Resolution Scale stops at its ends.
                 self.sounds.push(if input.right { "FE_SOUND_CORE_NAV_RIGHT" } else { "FE_SOUND_CORE_NAV_LEFT" });
                 if row == Row::ShowLobbyChat {
                     self.state.show_lobby_chat = !self.state.show_lobby_chat;
@@ -370,6 +392,8 @@ impl Controller {
                     Row::Fisheye => values.fisheye = !values.fisheye,
                     Row::FpsCounter => values.fps_counter = !values.fps_counter,
                     Row::Fullscreen => values.fullscreen = !values.fullscreen,
+                    Row::VSync => values.vsync = !values.vsync,
+                    Row::ResolutionScale => values.resolution_scale = step_resolution_scale(values.resolution_scale, input.right),
                     _ => values.frame_rate_cap = step_frame_rate_cap(values.frame_rate_cap, input.right),
                 }
                 return Action::None;
@@ -439,7 +463,8 @@ mod tests {
         menu.update(press(|i| i.right = true), &mut settings);
         assert_eq!(
             menu.snapshot().values,
-            PcDisplaySettings { postfx: false, fisheye: false, frame_rate_cap: FrameRateCap::RefreshRate, fps_counter: false, fullscreen: false }
+            PcDisplaySettings { postfx: false, fisheye: false, frame_rate_cap: FrameRateCap::RefreshRate, fps_counter: false, fullscreen: false,
+                resolution_scale: 100, vsync: true }
         );
         menu.update(press(|i| i.down = true), &mut settings);
         menu.update(press(|i| i.left = true), &mut settings);
@@ -452,6 +477,25 @@ mod tests {
         assert_eq!(menu.snapshot().values.frame_rate_cap, FrameRateCap::Unlimited);
         menu.update(press(|i| i.left = true), &mut settings);
         assert_eq!(menu.snapshot().values.frame_rate_cap, FrameRateCap::RefreshRate);
+        // VSync toggles on its own, whatever the cap.
+        menu.update(press(|i| i.down = true), &mut settings);
+        menu.update(press(|i| i.left = true), &mut settings);
+        assert!(!menu.snapshot().values.vsync);
+        assert_eq!(menu.snapshot().values.frame_rate_cap, FrameRateCap::RefreshRate);
+        menu.update(press(|i| i.right = true), &mut settings);
+        assert!(menu.snapshot().values.vsync);
+        // Resolution Scale steps by 10 and stops at 50 and 200.
+        menu.update(press(|i| i.down = true), &mut settings);
+        menu.update(press(|i| i.right = true), &mut settings);
+        assert_eq!(menu.snapshot().values.resolution_scale, 110);
+        for _ in 0..10 {
+            menu.update(press(|i| i.left = true), &mut settings);
+        }
+        assert_eq!(menu.snapshot().values.resolution_scale, 50);
+        for _ in 0..20 {
+            menu.update(press(|i| i.right = true), &mut settings);
+        }
+        assert_eq!(menu.snapshot().values.resolution_scale, 200);
         menu.update(press(|i| i.down = true), &mut settings);
         menu.update(press(|i| i.right = true), &mut settings);
         assert!(menu.snapshot().values.fps_counter);

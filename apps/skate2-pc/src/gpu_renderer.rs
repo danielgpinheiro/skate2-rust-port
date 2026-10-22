@@ -52,6 +52,8 @@ mod shadow_map;
 mod texture_bc;
 pub(crate) mod visual_indicator;
 pub(crate) mod particles;
+pub(crate) mod crowd;
+pub(crate) mod deck_ao;
 pub(crate) mod movie;
 mod stereoscopy;
 
@@ -132,6 +134,11 @@ pub struct GpuScene {
     pub(crate) world_ui: Option<marker_ui::WorldPanel>,
     /// `ParticlePresentation::Draw`'s quad lists, drawn after the world UI.
     pub(crate) particles: Option<particles::Frame>,
+    /// `CrowdPresentation`'s imposter targets, drawn into the atlas after the shadow cascades,
+    /// and its imposters, drawn after the world UI and before the particles.
+    pub(crate) crowd: crowd::Frame,
+    /// `RenderAOBoxes`' boxes for this frame's skaters, drawn after the uber pass.
+    pub(crate) deck_ao: Option<deck_ao::DeckAoFrame>,
     /// `VIPresentation::Render`'s strips, drawn after the world UI, before PostFX.
     pub(crate) visual_indicators: Option<visual_indicator::Frame>,
     /// `SkaterPresEntity::DrawName`'s online names, drawn after the scene's meshes.
@@ -192,7 +199,8 @@ impl PresentPacing {
     }
 }
 
-/// The Frame Rate Cap's 60 and 120: a frame starts one interval after the last presented frame
+/// The Frame Rate Cap's 60 and 120, and Refresh Rate without VSync (the monitor's interval): a
+/// frame starts one interval after the last presented frame
 /// started, or at once when it is later. The wait comes before the client reads its clock, so
 /// the moments the frames show keep the interval too.
 #[derive(Default)]
@@ -316,7 +324,17 @@ pub struct GpuRenderer {
     stereo_objects_active: bool,
     present_pacing: PresentPacing,
     frame_cap: FrameCap,
+    /// For the monitor's refresh rate.
+    window: Arc<Window>,
+    /// The monitor's refresh interval and when it was read.
+    refresh: Option<(Instant, Duration)>,
     display_settings: std::cell::Cell<skate2_core::ui::options::PcDisplaySettings>,
+    /// The Resolution Scale (percent) the scene's depth, colour and PostFX targets are built
+    /// at: 100 while a frame has no final blit to bring a scaled scene to the window, or when
+    /// the GPU could not allocate `scale_requested`.
+    resolution_scale: u8,
+    /// The Resolution Scale last asked for, so a refused one is not retried every frame.
+    scale_requested: u8,
     /// PC port change: PostFX stays on while a cutscene's own post-fx runs, whatever Video
     /// Settings says.
     cutscene_postfx: std::cell::Cell<bool>,
@@ -327,6 +345,7 @@ pub struct GpuRenderer {
     marker_ui: marker_ui::Pipeline,
     visual_indicators: visual_indicator::Pipelines,
     particles: particles::Pipelines,
+    crowd: crowd::Pipelines,
     movie: std::cell::RefCell<movie::MoviePipeline>,
     final_pass: Option<final_pass::FinalPass>,
     /// `PostFX`'s main render target, which the video screens sample (`main_target.rs`).
@@ -362,6 +381,8 @@ pub struct GpuRenderer {
     present_modes: Vec<wgpu::PresentMode>,
     /// `SKATE2_NO_VSYNC`: Unlimited, whatever Video Settings say.
     no_vsync: bool,
+    /// The window has the keyboard focus.
+    focused: bool,
     last_frame: FrameDiagnostics,
     /// The most map runs a frame encodes at once (`SKATE2_MAP_THREADS`).
     map_threads: usize,
@@ -396,20 +417,68 @@ impl GpuRenderer {
             self.display_settings.get().frame_rate_cap
         }
     }
-    /// Before a frame starts: the Frame Rate Cap's wait at 60 and 120. Refresh Rate waits for
-    /// the refresh in the present instead.
+    /// Display Settings' VSync, off with `SKATE2_NO_VSYNC`.
+    fn vsync_setting(&self) -> bool {
+        !self.no_vsync && self.display_settings.get().vsync
+    }
+    /// Whether the present waits for the refresh: VSync, while the window has the focus. Without
+    /// it, `FrameCap` waits the refresh instead: once another window covers this one, its FIFO
+    /// swapchain can stop taking frames, and a frame held in the present holds the simulation,
+    /// whose next tick waits for this frame to take the last one (online, long enough for the
+    /// server to drop the game as frozen).
+    fn vsync(&self) -> bool {
+        self.vsync_setting() && self.focused
+    }
+    /// Whether the window has the keyboard focus.
+    pub(crate) fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+    /// Before a frame starts: the Frame Rate Cap's wait at 60 and 120, and at Refresh Rate
+    /// without VSync the monitor's interval. With VSync the present waits for the refresh;
+    /// while the window is unfocused, no frame starts sooner than a refresh after the last.
     pub(crate) fn wait_for_frame_cap(&mut self) {
-        let interval = match self.frame_rate_cap() {
+        let cap = match self.frame_rate_cap() {
             FrameRateCap::Fps60 => Some(Duration::from_secs(1) / 60),
             FrameRateCap::Fps120 => Some(Duration::from_secs(1) / 120),
+            FrameRateCap::RefreshRate if !self.vsync() => Some(self.refresh_interval()),
             FrameRateCap::Unlimited | FrameRateCap::RefreshRate => None,
+        };
+        let interval = if self.vsync_setting() && !self.vsync() {
+            let refresh = self.refresh_interval();
+            Some(cap.map_or(refresh, |cap| cap.max(refresh)))
+        } else {
+            cap
         };
         self.frame_cap.wait(interval);
     }
+    /// The monitor's refresh interval, read again each second as the window can move to another
+    /// monitor; 60 Hz when the monitor does not say.
+    fn refresh_interval(&mut self) -> Duration {
+        let now = Instant::now();
+        if let Some((read, interval)) = self.refresh {
+            if now.duration_since(read) < Duration::from_secs(1) {
+                return interval;
+            }
+        }
+        let hertz = self
+            .window
+            .current_monitor()
+            .and_then(|monitor| monitor.refresh_rate_millihertz())
+            .filter(|&millihertz| millihertz >= 1000)
+            .map_or(60.0, |millihertz| f64::from(millihertz) / 1000.0);
+        let interval = Duration::from_secs_f64(1.0 / hertz);
+        self.refresh = Some((now, interval));
+        interval
+    }
     pub async fn new(window: Arc<Window>) -> RenderResult<Self> {
         let size = window.inner_size();
-        let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window)?;
+        // Every backend and FXC, which ships with Windows, for DX12 shaders: wgpu's automatic
+        // choice takes any dxcompiler.dll on the PATH, and an old one without dxil.dll fails every
+        // shader. WGPU_BACKEND, WGPU_DX12_COMPILER and the other wgpu variables still override.
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::Fxc;
+        let instance = wgpu::Instance::new(descriptor.with_env());
+        let surface = instance.create_surface(Arc::clone(&window))?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -419,7 +488,9 @@ impl GpuRenderer {
             })
             .await
             .map_err(|error| format!("no compatible GPU adapter: {error}"))?;
-        eprintln!("diagnostic GPU adapter: {:?}", adapter.get_info());
+        let info = adapter.get_info();
+        eprintln!("diagnostic GPU adapter: {info:?}");
+        crate::panic_report::set_gpu(format!("{} ({:?}, driver {} {})", info.name, info.backend, info.driver, info.driver_info));
         let profile_features = if std::env::var_os("SKATE2_FRAME_PROFILE").is_some()
             && std::env::var_os("SKATE2_GPU_PROFILE").is_some()
         {
@@ -473,17 +544,10 @@ impl GpuRenderer {
             .ok_or("original gamma-2 output requires a non-sRGB 8-bit surface")?;
         let capture_supported = caps.usages.contains(wgpu::TextureUsages::COPY_SRC);
         let present_modes = caps.present_modes.clone();
-        // `SKATE2_NO_VSYNC` forces Unlimited, for measuring renderer headroom. Otherwise Refresh
-        // Rate until the profile's Video Settings load; `render_frame` follows the setting.
+        // `SKATE2_NO_VSYNC` forces VSync off and Unlimited, for measuring renderer headroom.
+        // Otherwise VSync until the profile's Display Settings load; `render_frame` follows them.
         let no_vsync = std::env::var_os("SKATE2_NO_VSYNC").is_some();
-        let present_mode = present_mode(
-            &present_modes,
-            if no_vsync {
-                FrameRateCap::Unlimited
-            } else {
-                FrameRateCap::RefreshRate
-            },
-        );
+        let present_mode = present_mode(&present_modes, !no_vsync);
         eprintln!("diagnostic present mode: {present_mode:?}");
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -604,6 +668,7 @@ impl GpuRenderer {
         let marker_ui = marker_ui::Pipeline::new(&device, &queue, format, sample_count);
         let visual_indicators = visual_indicator::Pipelines::new(&device, format, sample_count);
         let particles = particles::Pipelines::new(&device, format, sample_count);
+        let crowd = crowd::Pipelines::new(&device, format, sample_count, &object_layout, &texture_layout);
         let movie = std::cell::RefCell::new(movie::MoviePipeline::new(&device, format));
         let main_target = main_target::MainTarget::new(&device, format);
         let gpu_profile = gpu_profile::GpuProfile::new(&device, &queue);
@@ -611,17 +676,22 @@ impl GpuRenderer {
             character_uploads: frame_uploads::FrameUploads::new(&device),
             present_pacing: PresentPacing::default(),
             frame_cap: FrameCap::default(),
+            window,
+            refresh: None,
             mesh_arena: Arc::new(std::sync::Mutex::new(mesh_arena::MeshArena::default())),
             gpu_profile,
             fps,
             marker_ui,
             visual_indicators,
             particles,
+            crowd,
             movie,
             final_pass: None,
             main_target,
             stereo_objects_active: false,
             display_settings: Default::default(),
+            resolution_scale: 100,
+            scale_requested: 100,
             cutscene_postfx: Default::default(),
             surface,
             device,
@@ -648,6 +718,7 @@ impl GpuRenderer {
             capture_supported,
             present_modes,
             no_vsync,
+            focused: true,
             last_frame: FrameDiagnostics::default(),
             map_threads: render_workers(),
         })
@@ -670,9 +741,44 @@ impl GpuRenderer {
             self.config.width = width;
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
-            (self.depth, self.depth_sample, self.stencil_sample) = depth_view(&self.device, &self.config, self.sample_count);
-            self.msaa_color = msaa_view(&self.device, &self.config, self.sample_count);
-            if let Some(final_pass)=&mut self.final_pass {final_pass.resize(&self.device,width,height,&self.depth_sample,&self.stencil_sample,&self.main_target);}
+            self.rebuild_scene_targets();
+        }
+    }
+
+    /// The scene's size at `percent` of the render size, its longer side within the device's
+    /// largest texture.
+    fn scene_size(&self, percent: u8) -> (u32, u32) {
+        let (width, height) = (self.config.width, self.config.height);
+        if percent == 100 {
+            return (width, height);
+        }
+        let limit = self.device.limits().max_texture_dimension_2d;
+        let scale = (f64::from(percent) / 100.0).min(f64::from(limit) / f64::from(width.max(height)));
+        let side = |length: u32| ((f64::from(length) * scale).round() as u32).clamp(1, limit);
+        (side(width), side(height))
+    }
+
+    /// The scene's depth, MSAA colour and final-pass targets at `resolution_scale`; a scale the
+    /// GPU cannot allocate falls back to 100%.
+    fn rebuild_scene_targets(&mut self) {
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        self.build_scene_targets();
+        if let Some(error) = pollster::block_on(scope.pop()) {
+            if self.resolution_scale != 100 {
+                eprintln!("resolution scale {}% does not fit this GPU ({error}); using 100%", self.resolution_scale);
+                self.resolution_scale = 100;
+                self.build_scene_targets();
+            }
+        }
+    }
+
+    fn build_scene_targets(&mut self) {
+        let (width, height) = self.scene_size(self.resolution_scale);
+        let config = wgpu::SurfaceConfiguration { width, height, ..self.config.clone() };
+        (self.depth, self.depth_sample, self.stencil_sample) = depth_view(&self.device, &config, self.sample_count);
+        self.msaa_color = msaa_view(&self.device, &config, self.sample_count);
+        if let Some(final_pass) = &mut self.final_pass {
+            final_pass.resize(&self.device, width, height, &self.depth_sample, &self.stencil_sample, &self.main_target);
         }
     }
 
@@ -875,9 +981,23 @@ impl GpuRenderer {
             self.submit_uploads();
             return Ok(());
         }
+        // PC Resolution Scale: the scene renders at the scale only where a final blit brings it to
+        // the window; a frame without one draws straight into the window, at 100%.
+        let wanted = if scene.final_blit.is_some() {
+            self.display_settings.get().resolution_scale.clamp(*skate2_core::ui::options::RESOLUTION_SCALES.start(),
+                *skate2_core::ui::options::RESOLUTION_SCALES.end())
+        } else {
+            100
+        };
+        if wanted != self.scale_requested {
+            self.scale_requested = wanted;
+            self.resolution_scale = wanted;
+            self.rebuild_scene_targets();
+        }
         if let Some((_,vignette))=&scene.final_blit {
             if self.final_pass.is_none() {
-                self.final_pass=Some(final_pass::FinalPass::new(&self.device,&self.queue,self.config.format,self.config.width,self.config.height,vignette,
+                let (width, height) = self.scene_size(self.resolution_scale);
+                self.final_pass=Some(final_pass::FinalPass::new(&self.device,&self.queue,self.config.format,width,height,vignette,
                     &self.depth_sample,&self.stencil_sample,scene.postfx_overlay.as_ref().ok_or("PostFX x-ray texture absent")?,self.sample_count>1,&self.main_target)?);
             }
         }
@@ -888,7 +1008,7 @@ impl GpuRenderer {
         for object in &scene.objects {
             if let Some(character) = &object.character { character.apply_display_exposure(&self.character_uploads, settings.postfx); }
         }
-        let mode = present_mode(&self.present_modes, self.frame_rate_cap());
+        let mode = present_mode(&self.present_modes, self.vsync());
         if mode != self.config.present_mode {
             self.config.present_mode = mode;
             let mut config=self.config.clone();
@@ -930,6 +1050,7 @@ impl GpuRenderer {
         self.marker_ui.set_eye(&self.queue,eye.as_ref());
         self.visual_indicators.set_eye(&self.queue,eye.as_ref());
         self.particles.set_eye(&self.queue,eye.as_ref());
+        self.crowd.set_eye(&self.queue,eye.as_ref());
         if eye.is_some() || self.stereo_objects_active {
             for object in &scene.objects {
                 let central=*object.central_clip.lock().map_err(|_| "object projection lock")?;
@@ -1087,6 +1208,8 @@ impl GpuRenderer {
         if let Some(profile) = &self.gpu_profile {
             profile.stamp(&mut encoder, 2);
         }
+        // `RenderCrowdTargets` 0x82857b90 follows the shadow cascades.
+        self.crowd.record_targets(&mut encoder, &scene.crowd);
         if let Some(panel)=&scene.world_ui{self.marker_ui.record_panel(&mut encoder,panel);}
         let finish_start = Instant::now();
         let before = encoder.finish();
@@ -1241,6 +1364,8 @@ impl GpuRenderer {
             }
             // AptRenderingIntegration::Render3D, before PostFX and the flat UI.
             if let Some(panel)=&scene.world_ui{self.marker_ui.draw_panel(&mut pass,panel);}
+            // `RenderCrowdImposters` 0x82857d04, after Render3D.
+            self.crowd.draw_imposters(&mut pass, &scene.crowd);
             // ParticlePresentation::Draw at 0x82857d14, after Render3D and the crowd imposters.
             if let Some(frame) = &scene.particles {
                 self.particles.draw(&mut pass, frame);
@@ -1261,7 +1386,10 @@ impl GpuRenderer {
         }
         if let Some((parameters,_))=&scene.final_blit {
             if let Some((assets,frame))=scene.postfx.as_ref().filter(|_| settings.postfx) {
-                self.final_pass.as_mut().expect("initialized final pass").record_postfx(&self.queue,&mut encoder,assets,frame,eye)?;
+                self.final_pass.as_mut().expect("initialized final pass").record_postfx(&self.device,&self.queue,&mut encoder,assets,frame,scene.deck_ao.as_ref(),eye)?;
+            } else if let (Some((assets,frame)),Some(deck_ao),None)=(scene.postfx.as_ref(),scene.deck_ao.as_ref(),eye) {
+                // The deck shadow belongs to the scene, so turning PostFX off keeps it.
+                self.final_pass.as_mut().expect("initialized final pass").record_deck_ao(&self.device,&self.queue,&mut encoder,assets,frame,deck_ao);
             }
             if !eye.is_some_and(|e|e.field==0) {
             // ApplyFastUber 0x82846ca4 resolves the graded frame into the main target, which
@@ -1282,7 +1410,8 @@ impl GpuRenderer {
                     parameters.warp=[x*w,y.mul_add(w,1.-w),z*w,a*w];
                 }
             }
-            let parameters = parameters.for_display(settings);
+            let mut parameters = parameters.for_display(settings);
+            parameters.supersample = self.scene_size(self.resolution_scale).0 > self.config.width;
             self.final_pass.as_mut().expect("initialized final pass").record(&self.queue,&mut encoder,view,&parameters,scene.out_of_boundary_amount,0.0,false)?;
             // Without PostFX its bloom to white has no pass to lower the bloom threshold in:
             // the NIS fades show as a white cover of the same value over the scene.
@@ -2041,12 +2170,12 @@ fn uniform_bytes(matrix: &[f32; 16], color: &[f32; 4]) -> [u8; 80] {
     bytes
 }
 
-/// The surface mode for a Frame Rate Cap: Refresh Rate waits for the refresh (Fifo); the others
-/// present at once (Immediate, else Mailbox), 60 and 120 after `FrameCap`'s wait. Mailbox is not
-/// uncapped once the surface is reconfigured: on the NVIDIA Vulkan driver it then runs at most
-/// two frames per refresh.
-fn present_mode(supported: &[wgpu::PresentMode], cap: FrameRateCap) -> wgpu::PresentMode {
-    if cap == FrameRateCap::RefreshRate {
+/// The surface mode for VSync: on, each frame waits for the refresh (Fifo); off, frames present
+/// at once (Immediate, else Mailbox), the Frame Rate Cap's after `FrameCap`'s wait. Mailbox is
+/// not uncapped once the surface is reconfigured: on the NVIDIA Vulkan driver it then runs at
+/// most two frames per refresh.
+fn present_mode(supported: &[wgpu::PresentMode], vsync: bool) -> wgpu::PresentMode {
+    if vsync {
         wgpu::PresentMode::Fifo
     } else {
         [wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox]

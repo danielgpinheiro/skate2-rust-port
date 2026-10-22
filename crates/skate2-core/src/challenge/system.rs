@@ -281,6 +281,10 @@ pub enum Output {
     BigBlack { spawn: bool },
     /// `FrontEnd.OpenHOMResults`: `PushState(9)`, the Hall of Meat results.
     OpenHomResults,
+    /// `cCrowdPositionBuffer::DispatchCrowdPositions`: `cMsgCrowdBufferChanged` on the
+    /// presentation broadcaster; the presentation reads [`World::crowds`]' buffer as it takes it
+    /// (`Presentation::ReceiveCrowdBufferChanged`, `CrowdPresentation::Update`).
+    CrowdBufferChanged,
     /// `FrontEnd.ShowYesNoPopup` (no options: `ID_COMMON_NO` and `ID_COMMON_YES`) or
     /// `ShowGenericAttributePopup`: `FrontEndManager::OpenPopup` with the popup's id.
     ShowPopup { id: i32, title: String, description: String, options: Option<Vec<String>> },
@@ -563,6 +567,8 @@ pub struct World {
     pub(crate) sequence_connector: super::sequence_connector::SequenceConnectorManager,
     /// `Sk8ChallengeSystem::CalloutManager`.
     pub callouts: CalloutManager,
+    /// `Sk8ChallengeSystem::CrowdManager` and the `cCrowdPositionBuffer` it fills.
+    pub crowds: crowd::CrowdManager,
     /// `Sk8ChallengeSystem::ServiceManager`.
     pub services: ServiceManager,
     pub films: super::film::FilmManager,
@@ -619,6 +625,7 @@ pub(crate) fn run_main_activity(world: &mut World, activity: usize) {
     super::sequence_connector::run_main_activity(world, activity);
     living_world::run_main_activity(world, activity);
     map_icons::run_main_activity(world, activity);
+    crowd::run_main_activity(world, activity);
     dmo::run_main_activity(world, activity);
     let key = world.activities.activities[activity].key;
     // cSignPostManager::RunMainActivity825d7e08: a replay already sent OnChallengeRetry.
@@ -682,6 +689,7 @@ pub(crate) fn shutdown_activity_sub_controllers(world: &mut World, activity: usi
     ai::shutdown_activity(world, activity);
     dmo::shutdown_activity(world, activity);
     callouts::shutdown_activity(world, activity);
+    crowd::shutdown_activity(world, activity);
     assets::shutdown_activity(world, activity);
     super::competitors::shutdown_activity(world, activity);
 }
@@ -846,6 +854,7 @@ impl ChallengeSystem {
                 living_world: LivingWorldManager::default(),
                 sequence_connector: super::sequence_connector::SequenceConnectorManager::default(),
                 callouts: CalloutManager::default(),
+                crowds: crowd::CrowdManager::default(),
                 services: ServiceManager::default(),
                 films: super::film::FilmManager::default(),
                 competitors: super::competitors::CompetitorsManager::default(),
@@ -973,6 +982,7 @@ impl ChallengeSystem {
         teleport::update(&mut self.world);
         timers::update(&mut self.world);
         objectives::update(&mut self.objectives, &mut self.world);
+        crowd::update(&mut self.world);
         super::hom::update(&mut self.world);
         super::ots_discovery::update(&mut self.world);
         super::film::update(&mut self.world);
@@ -1009,6 +1019,9 @@ impl ChallengeSystem {
             }
         }
         self.deliver_terminations();
+        // The next update's Simulation::SimUpdate1 (0x8289f508) submits the crowds' line batches
+        // before its physics, for its own Update to read.
+        crowd::pre_update_submit(&mut self.world);
     }
 
     /// The front end's half of the frame: `HUDManager2::Update` reports groups

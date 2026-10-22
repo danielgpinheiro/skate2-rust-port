@@ -24,6 +24,30 @@ fn bounded(bits:u32,fallback:f32,min:f32,max:f32)->u32 {
     if value.is_finite() {value.clamp(min,max).to_bits()} else {fallback.to_bits()}
 }
 
+/// About twice the largest original look (Create a Skater's 19 components of up to 2 LODs, 38 in
+/// all; a pro's 11): a message or a shared replay names the models and textures this console
+/// reads in full, so a larger recipe is refused before any of them loads.
+const MOST_COMPONENTS:usize=32;
+const MOST_MODELS:usize=4;
+const MOST_LODS:usize=4;
+const MOST_LODS_IN_ALL:usize=64;
+const MOST_TEXTURES:usize=512;
+
+fn admissible(recipe:&CharacterRecipe)->Result<()> {
+    let models=||recipe.components.iter().flat_map(|part|&part.models);
+    let lods=||models().flat_map(|model|&model.lods);
+    let textures:usize=lods().flat_map(|lod|&lod.material_instances).flat_map(|instance|&instance.materials)
+        .map(|material|material.shader_parameters.len()).sum();
+    if recipe.components.len()>MOST_COMPONENTS||recipe.components.iter().any(|part|part.models.len()>MOST_MODELS)
+        ||models().any(|model|model.lods.len()>MOST_LODS)||lods().count()>MOST_LODS_IN_ALL||textures>MOST_TEXTURES {
+        return Err("replay character larger than any original look".into());
+    }
+    Ok(())
+}
+
+/// The most scenes, palettes and rigs a replay file's catalog holds.
+const REPLAY_LIMITS:[usize;3]=[4096,16384,4096];
+
 #[derive(Default)]
 pub(crate) struct Catalog {
     pub scenes:Vec<Arc<CharacterScene>>,pub palettes:Vec<Arc<CharacterPalette>>,pub rigs:Vec<Arc<SkaterRig>>,
@@ -74,16 +98,23 @@ impl Catalog {
         Ok(())
     }
     pub fn get(r:&mut Reader<'_>,mounts:&MountSet,vault:&Arc<AttributeRuntimeVault>)->Result<Self> {
+        Self::get_at_most(r,mounts,vault,REPLAY_LIMITS)
+    }
+    /// A catalog of at most `scenes` looks, `palettes` palettes and `rigs` rigs, each count
+    /// checked before the first of its entries is built.
+    pub fn get_at_most(r:&mut Reader<'_>,mounts:&MountSet,vault:&Arc<AttributeRuntimeVault>,
+        [scenes,palettes,rigs]:[usize;3])->Result<Self> {
         let mut result=Self::default();
-        let count=usize::get(r)?;if count>4096 {return Err("replay character count".into());}
+        let count=usize::get(r)?;if count>scenes {return Err("replay character count".into());}
         for _ in 0..count {
             let category=String::get(r)?;
             if !matches!(category.as_str(),"marquee"|"livingworld"|"vehicle"|"createacharacter"|"test") {return Err("replay character namespace".into());}
             let mut recipe=CharacterRecipe::parse(&Vec::<u8>::get(r)?).map_err(|e|e.to_string())?;
+            admissible(&recipe)?;
             recipe.customizations=recipe.customizations.map(shared);
             result.scenes.push(Arc::new(crate::mounted_character_scene::own_character_scene_category(mounts,&recipe,&category).map_err(|e|e.to_string())?));
         }
-        let count=usize::get(r)?;if count>16384 {return Err("replay palette count".into());}
+        let count=usize::get(r)?;if count>palettes {return Err("replay palette count".into());}
         for _ in 0..count {
             let scene=Arc::clone(result.scenes.get(usize::get(r)?).ok_or("replay scene reference")?);
             let skinning=CharacterSkinningState::get(r)?;
@@ -96,7 +127,7 @@ impl Catalog {
             }
             result.palettes.push(Arc::new(CharacterPalette::from_replay_skinning(scene,skinning).map_err(|e|e.to_string())?));
         }
-        let count=usize::get(r)?;if count>4096 {return Err("replay skater rig count".into());}
+        let count=usize::get(r)?;if count>rigs {return Err("replay skater rig count".into());}
         for _ in 0..count {
             let rig=SkaterRig {skeleton:Store::get(r)?,bind:Store::get(r)?,inverse_bind:Store::get(r)?,hips:Store::get(r)?,board:Store::get(r)?,
                 twist_bones:Store::get(r)?,local_bounds:Store::get(r)?,
@@ -136,5 +167,25 @@ impl Loaded {
         let mut material=CharacterMaterialAdmission::try_new(&finalized,palette,Arc::clone(&self.vault),self.cvars.clone()).map_err(|e|e.to_string())?;
         material.try_construct_from_header(header).map_err(|e|e.to_string())?;
         let material=Arc::new(Mutex::new(material));*current=Some(Arc::clone(&material));Ok(material)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recipe(components:usize,lods:usize)->CharacterRecipe {
+        CharacterRecipe {version:7,schema_name:"test".into(),category:0,memory_category:15,clone_type:3,
+            components:(0..components).map(|part|CharacterComponent {name:format!("part{part}"),models:vec![CharacterModel {asset_id:part as u64,
+                lods:(0..lods).map(|level|CharacterLod {level:level as u8,asset_id:level as u64,arena_asset_id:(part*8+level) as u64,material_instances:vec![]}).collect()}]}).collect(),
+            has_customizations:false,customizations:None,packed_size:0}
+    }
+
+    #[test]
+    fn a_look_the_size_of_the_original_ones_loads_and_a_larger_one_is_refused() {
+        assert!(admissible(&recipe(19,2)).is_ok());
+        assert!(admissible(&recipe(MOST_COMPONENTS+1,1)).is_err());
+        assert!(admissible(&recipe(4,MOST_LODS+1)).is_err());
+        assert!(admissible(&recipe(MOST_COMPONENTS,3)).is_err());
     }
 }

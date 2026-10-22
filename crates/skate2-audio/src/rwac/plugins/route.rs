@@ -47,6 +47,13 @@ impl Route {
         }
         self.declick_value = [0.0; 6];
     }
+
+    /// Unlinked by a released SubMix (`SubMix::ReleaseEvent` 0x82bfc2d8): unconnected, no declick.
+    pub fn unlink(&mut self, slots: &[usize]) {
+        if self.target.is_some_and(|slot| slots.contains(&slot)) {
+            self.target = None;
+        }
+    }
 }
 
 impl PlugIn for Route {

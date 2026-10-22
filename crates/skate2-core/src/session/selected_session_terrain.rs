@@ -574,6 +574,25 @@ impl<Effects: WorldStreamEffects> SelectedSessionTerrain<Effects> {
         Ok(self.terrain.as_ref().ok_or(SelectedSessionTerrainError::Pending)?.focus_resident(&ids))
     }
 
+    /// Whether a travel can land at `position`: a number at which the simulation focus selects a
+    /// collection (an online area holds the focus wherever the skater goes). Elsewhere the stream
+    /// holds nothing, as at another world's location (the training facility's), which the port
+    /// does not load.
+    pub(crate) fn landable(&self, position: [f32; 3]) -> Result<bool, SelectedSessionTerrainError> {
+        if self.area.is_some() {
+            return Ok(true);
+        }
+        if position.iter().any(|value| !value.is_finite()) {
+            return Ok(false);
+        }
+        Ok(!self.focus_selection(position)?.is_empty())
+    }
+
+    /// Where the simulation focus is.
+    pub(crate) fn focus_position(&self) -> Option<[f32; 3]> {
+        self.focus.as_ref().map(crate::streaming::StreamFocusState::position)
+    }
+
     /// Holds the simulation focus on an online game's area, `name` being its challenge's name and
     /// `position` the challenge's location; `None` lets the skater move it again (`BackToSP`
     /// 0x8273da50: `UnloadSimStreamXml`, online mode off).

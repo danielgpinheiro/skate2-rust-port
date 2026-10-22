@@ -5,6 +5,8 @@ use std::{ops::Range, sync::Arc};
 
 /// `CACPartDB::mPartSlotNames` 0x830073f0 for `SKATE_DECK` (slot 11).
 const SKATE_DECK_COMPONENT: &str = "SkateBoard";
+/// `SkaterPresentation::InitAnimation` 0x827e1d54: `mSkateboardBone` is this hierarchy bone.
+const SKATEBOARD_ROOT: &str = "skateboard_root";
 
 #[derive(Debug)]
 pub enum CharacterPaletteError {
@@ -64,6 +66,13 @@ pub struct CharacterPalette {
     generation: u64,
     published: bool,
     transforms_complete: bool,
+    /// `mSkateboardBone`: the hierarchy index of `skateboard_root` (`HierarchyData::GetBone`).
+    deck_bone: Option<usize>,
+    /// That bone's matrix (global pose times inverse bind) from the last
+    /// `update_bone_transforms`.
+    deck_matrix: Option<AnimationMatrix>,
+    /// The deck's world matrix the last publication placed it at.
+    deck_world: Option<AnimationMatrix>,
 }
 /// Host publication ownership; distinct palettes may share the same asset scene.
 #[derive(Clone, Debug)]
@@ -99,7 +108,7 @@ impl CharacterPalette {
         default_bone: &str,
     ) -> Result<Self, CharacterPaletteError> {
         let skinning = scene.build_skinning_state(lod, hierarchy, default_bone)?;
-        Self::from_skinning(scene, skinning, None)
+        Self::from_skinning(scene, skinning, None, skateboard_bone(hierarchy))
     }
     /// `cPresPedestrian::cPresPedestrian` 0x828122b0: with the model's
     /// `livingworld_models` `Hide_Skateboard` set, `RemoveComponentInstances`
@@ -121,23 +130,24 @@ impl CharacterPalette {
         removed: Option<usize>,
     ) -> Result<Self, CharacterPaletteError> {
         let skinning = scene.build_skinning_state_without(lod, hierarchy, "Hips", removed)?;
-        Self::from_skinning(scene, skinning, removed)
+        Self::from_skinning(scene, skinning, removed, skateboard_bone(hierarchy))
     }
     /// Rebind a saved presentation's recorded remaps to the same original assets.
     /// A `SkateBoard` the recording left out of a LOD that has its models stays
-    /// out at the next LOD switch.
+    /// out at the next LOD switch. The deck bone comes from the recorded rig.
     pub(crate) fn from_replay_skinning(scene:Arc<CharacterScene>,skinning:CharacterSkinningState)->Result<Self,CharacterPaletteError> {
         let removed = skate_deck_component(&scene).filter(|&index| {
             scene.components[index].models.iter().flat_map(|model| &model.lods)
                 .any(|lod| lod.level == skinning.lod_level)
                 && !skinning.parts.iter().any(|part| part.component_index == index)
         });
-        Self::from_skinning(scene, skinning, removed)
+        Self::from_skinning(scene, skinning, removed, None)
     }
     fn from_skinning(
         scene: Arc<CharacterScene>,
         skinning: CharacterSkinningState,
         removed_component: Option<usize>,
+        deck_bone: Option<usize>,
     ) -> Result<Self, CharacterPaletteError> {
         let mut parts = Vec::with_capacity(skinning.parts.len());
         for part in &skinning.parts {
@@ -174,6 +184,9 @@ impl CharacterPalette {
             generation: 0,
             published: false,
             transforms_complete: false,
+            deck_bone,
+            deck_matrix: None,
+            deck_world: None,
         })
     }
     #[must_use]
@@ -259,6 +272,7 @@ impl CharacterPalette {
         }
         self.published = false;
         self.transforms_complete = false;
+        self.deck_matrix = self.deck_bone.and_then(|bone| matrices.get(bone).copied());
         for (index, part) in self.parts.iter_mut().enumerate() {
             part.matrices = Some(
                 self.scene
@@ -292,6 +306,7 @@ impl CharacterPalette {
             pack_rows_into(&matrices, local_to_world, part.rows.get_or_insert_with(Vec::new));
             part.packed = Some(matrices);
         }
+        self.deck_world = self.deck_frame(local_to_world);
         self.generation = self
             .generation
             .checked_add(1)
@@ -319,11 +334,38 @@ impl CharacterPalette {
                 .ok_or(CharacterPaletteError::MissingMatrices(index))?;
             pack_rows_into(matrices, local_to_world, part.rows.get_or_insert_with(Vec::new));
         }
+        self.deck_world = self.deck_frame(local_to_world);
         self.generation = self
             .generation
             .checked_add(1)
             .ok_or(CharacterPaletteError::GenerationOverflow)?;
         Ok(())
+    }
+
+    /// The deck bone's frame under a local-to-world: its matrix times its bind pose (the
+    /// inverse of its inverse bind), placed by the local-to-world.
+    fn deck_frame(&self, local_to_world: AnimationMatrix) -> Option<AnimationMatrix> {
+        let bone = self.deck_bone?;
+        let bind = inverse(self.skinning.hierarchy_inverse_bind_pose.get(bone)?)?;
+        let pose = crate::actor_face_playback::presentation::move_root::multiply(self.deck_matrix?, bind);
+        Some(crate::actor_face_playback::presentation::move_root::multiply(local_to_world, pose))
+    }
+
+    /// `SkaterPresentation::GetDeckMatrix` 0x8282e940 of the published pose: the deck's world
+    /// matrix (the `skateboard_root` pose, the hips transform and the root), its columns being
+    /// the native rows; none before a publication or without a deck bone.
+    #[must_use]
+    pub fn deck_world(&self) -> Option<AnimationMatrix> {
+        self.deck_world.filter(|_| self.published)
+    }
+
+    pub(crate) fn has_deck_bone(&self) -> bool {
+        self.deck_bone.is_some()
+    }
+
+    /// A recorded palette's `mSkateboardBone`, from the rig recorded with it.
+    pub(crate) fn set_deck_bone(&mut self, bone: usize) {
+        self.deck_bone = Some(bone);
     }
 
     /// # Errors
@@ -356,9 +398,42 @@ impl CharacterPalette {
     }
 }
 
+/// A general 4x4 inverse (cofactors, in double precision); none for a singular matrix.
+fn inverse(m: &AnimationMatrix) -> Option<AnimationMatrix> {
+    let a: [f64; 16] = std::array::from_fn(|index| f64::from(m[index]));
+    let mut out = [0.0_f64; 16];
+    out[0] = a[5] * a[10] * a[15] - a[5] * a[11] * a[14] - a[9] * a[6] * a[15] + a[9] * a[7] * a[14] + a[13] * a[6] * a[11] - a[13] * a[7] * a[10];
+    out[4] = -a[4] * a[10] * a[15] + a[4] * a[11] * a[14] + a[8] * a[6] * a[15] - a[8] * a[7] * a[14] - a[12] * a[6] * a[11] + a[12] * a[7] * a[10];
+    out[8] = a[4] * a[9] * a[15] - a[4] * a[11] * a[13] - a[8] * a[5] * a[15] + a[8] * a[7] * a[13] + a[12] * a[5] * a[11] - a[12] * a[7] * a[9];
+    out[12] = -a[4] * a[9] * a[14] + a[4] * a[10] * a[13] + a[8] * a[5] * a[14] - a[8] * a[6] * a[13] - a[12] * a[5] * a[10] + a[12] * a[6] * a[9];
+    out[1] = -a[1] * a[10] * a[15] + a[1] * a[11] * a[14] + a[9] * a[2] * a[15] - a[9] * a[3] * a[14] - a[13] * a[2] * a[11] + a[13] * a[3] * a[10];
+    out[5] = a[0] * a[10] * a[15] - a[0] * a[11] * a[14] - a[8] * a[2] * a[15] + a[8] * a[3] * a[14] + a[12] * a[2] * a[11] - a[12] * a[3] * a[10];
+    out[9] = -a[0] * a[9] * a[15] + a[0] * a[11] * a[13] + a[8] * a[1] * a[15] - a[8] * a[3] * a[13] - a[12] * a[1] * a[11] + a[12] * a[3] * a[9];
+    out[13] = a[0] * a[9] * a[14] - a[0] * a[10] * a[13] - a[8] * a[1] * a[14] + a[8] * a[2] * a[13] + a[12] * a[1] * a[10] - a[12] * a[2] * a[9];
+    out[2] = a[1] * a[6] * a[15] - a[1] * a[7] * a[14] - a[5] * a[2] * a[15] + a[5] * a[3] * a[14] + a[13] * a[2] * a[7] - a[13] * a[3] * a[6];
+    out[6] = -a[0] * a[6] * a[15] + a[0] * a[7] * a[14] + a[4] * a[2] * a[15] - a[4] * a[3] * a[14] - a[12] * a[2] * a[7] + a[12] * a[3] * a[6];
+    out[10] = a[0] * a[5] * a[15] - a[0] * a[7] * a[13] - a[4] * a[1] * a[15] + a[4] * a[3] * a[13] + a[12] * a[1] * a[7] - a[12] * a[3] * a[5];
+    out[14] = -a[0] * a[5] * a[14] + a[0] * a[6] * a[13] + a[4] * a[1] * a[14] - a[4] * a[2] * a[13] - a[12] * a[1] * a[6] + a[12] * a[2] * a[5];
+    out[3] = -a[1] * a[6] * a[11] + a[1] * a[7] * a[10] + a[5] * a[2] * a[11] - a[5] * a[3] * a[10] - a[9] * a[2] * a[7] + a[9] * a[3] * a[6];
+    out[7] = a[0] * a[6] * a[11] - a[0] * a[7] * a[10] - a[4] * a[2] * a[11] + a[4] * a[3] * a[10] + a[8] * a[2] * a[7] - a[8] * a[3] * a[6];
+    out[11] = -a[0] * a[5] * a[11] + a[0] * a[7] * a[9] + a[4] * a[1] * a[11] - a[4] * a[3] * a[9] - a[8] * a[1] * a[7] + a[8] * a[3] * a[5];
+    out[15] = a[0] * a[5] * a[10] - a[0] * a[6] * a[9] - a[4] * a[1] * a[10] + a[4] * a[2] * a[9] + a[8] * a[1] * a[6] - a[8] * a[2] * a[5];
+    let determinant = a[0] * out[0] + a[1] * out[4] + a[2] * out[8] + a[3] * out[12];
+    if determinant == 0.0 || !determinant.is_finite() {
+        return None;
+    }
+    #[expect(clippy::cast_possible_truncation, reason = "the inverse's single-precision lanes")]
+    let inverse = std::array::from_fn(|index| (out[index] / determinant) as f32);
+    Some(inverse)
+}
+
 /// `RemoveComponentInstances` finds the component by its pooled name.
 fn skate_deck_component(scene: &CharacterScene) -> Option<usize> {
     scene.components.iter().position(|component| component.name == SKATE_DECK_COMPONENT)
+}
+
+fn skateboard_bone(hierarchy: &CharacterHierarchy) -> Option<usize> {
+    hierarchy.bone_names.iter().position(|name| name.eq_ignore_ascii_case(SKATEBOARD_ROOT))
 }
 
 /// Reuse each part's output allocation, as the retained matrix buffer in

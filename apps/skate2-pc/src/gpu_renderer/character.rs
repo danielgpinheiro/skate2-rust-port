@@ -237,16 +237,30 @@ impl CharacterPipelines {
     /// order, then every multi-pass mesh pass-major, each only for the passes
     /// it has.
     pub(super) fn technique(&self, character: &CharacterBinding) -> &[wgpu::RenderPipeline] {
+        self.technique_for(character, character.ghosted)
+    }
+
+    /// The `crowd` technique `CrowdImposterTarget::RenderPresEntity` 0x827e9298 sets for the
+    /// imposter atlas: livingworld_stamp's own; every other effect lacks one, so
+    /// `cEffectList::SetCurrentEffect` 82e1c210 takes its `default`.
+    pub(super) fn crowd_technique(&self, character: &CharacterBinding) -> &[wgpu::RenderPipeline] {
+        if character.family == CharacterShaderFamily::LivingWorldStamp && !character.stamp.as_ref().is_some_and(|b| b.cas) {
+            return self.stamp.crowd_technique();
+        }
+        self.technique_for(character, false)
+    }
+
+    fn technique_for(&self, character: &CharacterBinding, ghosted: bool) -> &[wgpu::RenderPipeline] {
         if character.stamp.as_ref().is_some_and(|b|b.cas) {
-            return self.stamp.cas_technique(character.family,character.ghosted);
+            return self.stamp.cas_technique(character.family,ghosted);
         }
         if character.stamp.is_some() {
-            return self.stamp.surface_technique(character.family,character.ghosted);
+            return self.stamp.surface_technique(character.family,ghosted);
         }
         match character.family {
-            CharacterShaderFamily::LivingWorldStamp => self.stamp.technique(character.ghosted),
-            CharacterShaderFamily::LivingWorld => self.stamp.surface_technique(character.family,character.ghosted),
-            family if character.ghosted && family.has_ghost_technique() => &self.ghost,
+            CharacterShaderFamily::LivingWorldStamp => self.stamp.technique(ghosted),
+            CharacterShaderFamily::LivingWorld => self.stamp.surface_technique(character.family,ghosted),
+            family if ghosted && family.has_ghost_technique() => &self.ghost,
             CharacterShaderFamily::Character => std::slice::from_ref(&self.character),
             CharacterShaderFamily::Ropa => std::slice::from_ref(&self.ropa),
             CharacterShaderFamily::Hair | CharacterShaderFamily::HairRopa => &self.hair,
@@ -811,7 +825,7 @@ struct Object { world_to_clip: mat4x4<f32>, color: vec4<f32> }
 // Invariant: a multi-pass technique runs one vertex program for every pass,
 // and later passes depth-test LESSEQUAL against the depth earlier ones wrote.
 // uv: UV0 in xy; defaulthair `Out.UV = half4(In.UV0.xy, In.UV1.xy)`.
-struct Output { @builtin(position) @invariant position: vec4<f32>, @location(0) uv: vec4<f32> }
+struct Output { @builtin(position) @invariant position: vec4<f32>, @location(0) @interpolate(perspective, centroid) uv: vec4<f32> }
 fn skin_position(position: vec3<f32>, stored_weights: vec4<u32>,
                  stored_indices: vec4<u32>) -> vec4<f32> {
     return object.world_to_clip * skin_world(position, stored_weights, stored_indices);
@@ -833,7 +847,7 @@ fn skin_position(position: vec3<f32>, stored_weights: vec4<u32>,
     output.uv = vec4<f32>(uv, alpha_uv);
     return output;
 }
-@fragment fn fs_main(@location(0) uv: vec4<f32>) -> @location(0) vec4<f32> {
+@fragment fn fs_main(@location(0) @interpolate(perspective, centroid) uv: vec4<f32>) -> @location(0) vec4<f32> {
     let sampled = textureSample(diffuse, diffuse_sampler, uv.xy);
     // Deliberately opaque unlit diffuse inspection on the gamma-2 surface.
     return vec4<f32>(sampled.rgb, 1.0);
@@ -841,7 +855,7 @@ fn skin_position(position: vec3<f32>, stored_weights: vec4<u32>,
 // ghost pass 1: the default pixel program writes outcolor.a = i_params[0].x
 // (defaultcharacter.fx:72, defaultcharacter_ropa.fx:84), carried in the
 // Object colour alpha; ALPHATESTENABLE GREATEREQUAL ALPHAREF 1 rejects first.
-@fragment fn fs_ghost(@location(0) uv: vec4<f32>) -> @location(0) vec4<f32> {
+@fragment fn fs_ghost(@location(0) @interpolate(perspective, centroid) uv: vec4<f32>) -> @location(0) vec4<f32> {
     let sampled = textureSample(diffuse, diffuse_sampler, uv.xy);
     let alpha = object.color.a;
     if (alpha < 0.0039215689) {
@@ -852,7 +866,7 @@ fn skin_position(position: vec3<f32>, stored_weights: vec4<u32>,
 // defaulthair.fx defaultPS coverage around the diagnostic colour:
 // `vDiffuse.a = tex2D(i_alpha, In.UV.zw)` keeps the fetch's first lane and
 // `outcolor.a = vDiffuse.a * i_params[0].x` (the Object colour alpha).
-@fragment fn fs_hair(@location(0) uv: vec4<f32>) -> @location(0) vec4<f32> {
+@fragment fn fs_hair(@location(0) @interpolate(perspective, centroid) uv: vec4<f32>) -> @location(0) vec4<f32> {
     let sampled = textureSample(diffuse, diffuse_sampler, uv.xy);
     let coverage = textureSample(hair_alpha, hair_alpha_sampler, uv.zw).r;
     return vec4<f32>(sampled.rgb, coverage * object.color.a);

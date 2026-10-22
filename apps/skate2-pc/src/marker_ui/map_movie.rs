@@ -206,13 +206,16 @@ impl MapMovie {
                     format!("#{}/{}", path.reached, path.total).encode_utf16().collect(),
                 );
                 row.named(&["labelText"])?.text = Some(path.objective.encode_utf16().collect());
-                let complete = child(row, "completeText")?;
-                complete.clip.visible = path.reached == path.total;
-                if complete.clip.visible {
-                    // mHomPathCompleteTextAlpha=50. Native counts the active
-                    // challenge too; retain that comparison exactly.
-                    complete.entry.colour_scale = (complete.entry.colour_scale & 0x00ff_ffff) | 0x7f00_0000;
-                    complete.clip.script_transform = true;
+                // mChallenge0..3 (characters 38, 42, 46, 50) author no completeText, and APT
+                // drops SetHomPanelData's _alpha and _visible writes to a missing child.
+                if let Some(complete) = authored_child(row, "completeText") {
+                    complete.clip.visible = path.reached == path.total;
+                    if complete.clip.visible {
+                        // mHomPathCompleteTextAlpha=50. Native counts the active
+                        // challenge too; retain that comparison exactly.
+                        complete.entry.colour_scale = (complete.entry.colour_scale & 0x00ff_ffff) | 0x7f00_0000;
+                        complete.clip.script_transform = true;
+                    }
                 }
             }
         }
@@ -704,10 +707,10 @@ pub(super) fn styled_button_items(view:&mut Clip,assets:&Assets,items:&[(&str,&s
 }
 
 fn child<'a>(clip: &'a mut Clip, name: &str) -> RenderResult<&'a mut Child> {
-    clip.children
-        .values_mut()
-        .find(|c| c.entry.name.as_deref() == Some(name))
-        .ok_or_else(|| format!("missing authored map child {name}").into())
+    authored_child(clip, name).ok_or_else(|| format!("missing authored map child {name}").into())
+}
+fn authored_child<'a>(clip: &'a mut Clip, name: &str) -> Option<&'a mut Child> {
+    clip.children.values_mut().find(|c| c.entry.name.as_deref() == Some(name))
 }
 fn height(clip: &Clip, assets: &Assets) -> RenderResult<f32> {
     Ok(bounds(clip, assets)?.map_or(0., |r| r.bottom - r.top))

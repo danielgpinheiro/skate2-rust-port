@@ -132,6 +132,8 @@ pub(super) struct PostFx {
     /// Presentation time since the grades were last written.
     grade_time: f32,
     diagnostic_view: u8,
+    /// `RenderAOBoxes` after the uber or visual FX pass.
+    deck_ao: super::deck_ao::DeckAo,
 }
 impl PostFx {
     /// `depth` is the scene's depth aspect, which the NIS grade reads.
@@ -363,7 +365,9 @@ impl PostFx {
             state: Arc::new(AtomicU8::new(0)),
             frame: 0,
         });
+        let deck_ao = super::deck_ao::DeckAo::new(device, [format, wgpu::TextureFormat::Rgba8Unorm], depth, stencil, multisampled);
         Self {
+            deck_ao,
             scene,
             targets,
             stages,
@@ -461,13 +465,37 @@ impl PostFx {
         }
         Ok(())
     }
-    pub(super) fn record(
+    /// With PostFX off the scene is drawn straight into `output`, where `RenderAOBoxes` still
+    /// darkens it: the camera planes give `g_DOFCameraInfoX/Y`, and no bloom lightens the boxes.
+    #[expect(clippy::too_many_arguments, reason = "RenderAOBoxes' inputs")]
+    pub(super) fn record_deck_ao(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         output: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
         assets: &Assets,
         frame: &Frame,
+        deck_ao: &super::deck_ao::DeckAoFrame,
+    ) {
+        let Some([near_plane, far_plane]) = frame.camera_planes else { return };
+        let depth = far_plane - near_plane;
+        let dof = [-(far_plane * near_plane / depth), far_plane / depth];
+        self.deck_ao.record(device, queue, encoder, output, format, deck_ao, assets.deck_ao, 0.0, dof);
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "the frame's PostFX inputs")]
+    pub(super) fn record(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        output: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        assets: &Assets,
+        frame: &Frame,
+        deck_ao: Option<&super::deck_ao::DeckAoFrame>,
         eye: Option<&super::stereoscopy::Eye>,
     ) -> RenderResult<()> {
         // Each submit's device maintenance maps the readbacks the GPU has finished.
@@ -668,20 +696,38 @@ impl PostFx {
         }
         c[15][0] = if frame.cinematic { 1.41412354 } else { 1.41 };
         c[25] = frame.final_mult;
+        // ApplyVisualFX 0x82846914 / ApplyFastUber 0x82846c74: RenderAOBoxes into the target
+        // the pass just wrote, with this frame's `g_DOFCameraInfoX/Y`.
+        let boxes = deck_ao.filter(|_| depth_inputs.is_some());
+        let (bloom, dof) = (c[9][0], [c[31][0], c[31][1]]);
         if let Some(eye)=eye {
-            if eye.field==0 { self.stages[11].record(queue,encoder,&self.targets[8].view,&c); }
+            if eye.field==0 {
+                self.stages[11].record(queue,encoder,&self.targets[8].view,&c);
+                if let Some(boxes) = boxes {
+                    self.deck_ao.record(device, queue, encoder, &self.targets[8].view, wgpu::TextureFormat::Rgba8Unorm, boxes, assets.deck_ao, bloom, dof);
+                }
+            }
             else {
                 c[15][0]=1.41;
                 self.stages[15].record(queue,encoder,output,&c);
+                if let Some(boxes) = boxes {
+                    self.deck_ao.record(device, queue, encoder, output, format, boxes, assets.deck_ao, bloom, dof);
+                }
             }
         } else if frame.cinematic {
             if depth_inputs.is_none() {
                 return Err("cinematic PostFX frame without grade inputs".into());
             }
             self.stages[11].record(queue, encoder, &self.targets[8].view, &c);
+            if let Some(boxes) = boxes {
+                self.deck_ao.record(device, queue, encoder, &self.targets[8].view, wgpu::TextureFormat::Rgba8Unorm, boxes, assets.deck_ao, bloom, dof);
+            }
             self.stages[12].record(queue, encoder, output, &c);
         } else {
             self.stages[10].record(queue, encoder, output, &c);
+            if let Some(boxes) = boxes {
+                self.deck_ao.record(device, queue, encoder, output, format, boxes, assets.deck_ao, bloom, dof);
+            }
         }
         if self.diagnostic_view != 0 && !eye.is_some_and(|e|e.field==0) {
             self.stages[12 + self.diagnostic_view as usize].record(queue, encoder, output, &c);

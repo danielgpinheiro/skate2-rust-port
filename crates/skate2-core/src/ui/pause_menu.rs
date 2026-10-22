@@ -18,6 +18,8 @@ pub enum PauseMenuOption {
     RestartChallenge = 11,
     QuitChallenge = 12,
     SaveReplay = 13,
+    /// Leave Challenge (PC port addition).
+    LeaveChallenge = 14,
 }
 
 #[cfg(test)]
@@ -114,6 +116,40 @@ mod quit_tests {
         let state=menu.update(PauseMenuInput{select:true,..Default::default()},true);
         assert_eq!(state.popup,Some((HubPopup::Quit,0)));
     }
+
+    #[test]
+    fn leave_challenge_sits_above_quit_game_while_the_round_runs() {
+        let mut menu=PauseMenuController::default();
+        menu.set_hub(StartHub::OnlineChallenge);
+        assert_eq!(menu.options(),[PauseMenuOption::Settings,PauseMenuOption::LeaveChallenge,PauseMenuOption::Quit]);
+        // A finished round offers no Leave Challenge: down goes from Settings to Quit Game.
+        menu.update(PauseMenuInput{start:true,..Default::default()},true);
+        menu.acknowledge_intro();
+        menu.update(PauseMenuInput{down:true,..Default::default()},true);
+        assert_eq!(menu.selected_option(),PauseMenuOption::Quit);
+        menu.update(PauseMenuInput{start:true,..Default::default()},true);
+        menu.set_leave_challenge(true);
+        menu.update(PauseMenuInput{start:true,..Default::default()},true);
+        menu.acknowledge_intro();
+        menu.update(PauseMenuInput{down:true,..Default::default()},true);
+        assert_eq!(menu.selected_option(),PauseMenuOption::LeaveChallenge);
+        let state=menu.update(PauseMenuInput{select:true,..Default::default()},true);
+        assert_eq!(state.popup,Some((HubPopup::LeaveChallenge,0)));
+        // No, the default, leaves the hub up and nothing confirmed.
+        let state=menu.update(PauseMenuInput{select:true,..Default::default()},true);
+        assert!(state.visible && state.popup.is_none() && !menu.take_leave_challenge_confirmed());
+        menu.update(PauseMenuInput{select:true,..Default::default()},true);
+        menu.update(PauseMenuInput{down:true,..Default::default()},true);
+        let state=menu.update(PauseMenuInput{select:true,..Default::default()},true);
+        assert!(!state.visible && menu.take_leave_challenge_confirmed() && !menu.take_quit_confirmed());
+        // The round finished with the row selected: A on it opens nothing.
+        menu.update(PauseMenuInput{start:true,..Default::default()},true);
+        menu.acknowledge_intro();
+        menu.update(PauseMenuInput{down:true,..Default::default()},true);
+        menu.set_leave_challenge(false);
+        let state=menu.update(PauseMenuInput{select:true,..Default::default()},true);
+        assert_eq!(state.popup,None);
+    }
 }
 
 impl PauseMenuOption {
@@ -134,6 +170,7 @@ impl PauseMenuOption {
             Self::RestartChallenge => "ID_START_HUB_RESTART_CHALLENGE",
             Self::QuitChallenge => "ID_START_HUB_QUIT_CHALLENGE",
             Self::SaveReplay => "ID_START_HUB_SAVE_REPLAY",
+            Self::LeaveChallenge => "#Leave Challenge",
         }
     }
 
@@ -240,8 +277,9 @@ pub const ONLINE_FREESKATE_OPTIONS: [PauseMenuOption; 3] =
     [PauseMenuOption::SaveReplay, PauseMenuOption::Settings, PauseMenuOption::Quit];
 
 /// `StartHubState_Online_Challenge::m_eMenuOptions` (`0x8208e2f4`, three rows). Its debug Debug
-/// row is left out.
-pub const ONLINE_CHALLENGE_OPTIONS: [PauseMenuOption; 2] = [PauseMenuOption::Settings, PauseMenuOption::Quit];
+/// row is left out; Leave Challenge above Quit Game is a PC port addition.
+pub const ONLINE_CHALLENGE_OPTIONS: [PauseMenuOption; 3] =
+    [PauseMenuOption::Settings, PauseMenuOption::LeaveChallenge, PauseMenuOption::Quit];
 
 /// The main challenge as the hub reads it (`cActivityManager::GetMainChallenge`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,13 +337,15 @@ impl StartHub {
 /// `eSk8FEPopup_QuitGameConfirmation` (152) while a main challenge runs, else
 /// `QuitGameConfirmationNoDataLoss` (153); Restart Challenge's `Options_RetryChallenge` (204);
 /// Quit Challenge's `QuitChallengeConfirmation` (154). Each template (gPopupTemplate82fdbc58) is
-/// No/Yes under `ID_COMMON_WARNING_TITLE`, defaulting to No and not cancellable.
+/// No/Yes under `ID_COMMON_WARNING_TITLE`, defaulting to No and not cancellable. Leave
+/// Challenge's, the same, is a PC port addition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HubPopup {
     Quit,
     QuitNoDataLoss,
     RetryChallenge,
     QuitChallenge,
+    LeaveChallenge,
 }
 
 impl HubPopup {
@@ -316,6 +356,7 @@ impl HubPopup {
             Self::QuitNoDataLoss => "ID_QUIT_GAME_MESSAGE_NO_DATA_LOSS",
             Self::RetryChallenge => "ID_OPTIONS_MENU_RETRY_CHALLENGE",
             Self::QuitChallenge => "ID_QUIT_CHALLENGE_MESSAGE",
+            Self::LeaveChallenge => "#Leave the challenge? You will wait in the pre-game lobby until the others finish.",
         }
     }
 }
@@ -370,6 +411,9 @@ pub struct PauseMenuSnapshot {
     pub screen_hidden: bool,
     /// StartHub::OnEnter8265e4d0 samples GetNumFramesTracked >=150.
     pub replay_available: bool,
+    /// Leave Challenge is offered: the local player plays an online challenge's round and has
+    /// not finished it (PC port addition).
+    pub leave_challenge: bool,
 }
 
 impl PauseMenuSnapshot {
@@ -445,7 +489,9 @@ impl PauseMenuSnapshot {
                 matches!(option, O::CreateASpotSpotInfo | O::QuitChallenge | O::Settings | O::TrickGuide)
             }
             StartHub::OnlineFreeSkate => matches!(option, O::Map | O::Settings | O::Quit),
-            StartHub::OnlineChallenge => matches!(option, O::QuitChallenge | O::Settings | O::Quit),
+            StartHub::OnlineChallenge => {
+                matches!(option, O::QuitChallenge | O::Settings | O::Quit) || (option == O::LeaveChallenge && self.leave_challenge)
+            }
         }
     }
 
@@ -476,6 +522,8 @@ pub struct PauseMenuController {
     retry_confirmed: bool,
     /// `QuitChallengeCallback` (`0x8265e868`) answered yes.
     abandon_confirmed: bool,
+    /// Leave Challenge's confirmation answered yes.
+    leave_challenge_confirmed: bool,
     /// `FrontEndState_StartHub::mbDoingQuit`: `DoQuit` (`0x8266b1a0`) faded the background in,
     /// whose callback `FadeToExit` (`0x8265e7f0`) pops the hub and calls `ExitToMainMenu`.
     doing_quit: bool,
@@ -519,6 +567,17 @@ impl PauseMenuController {
     /// `cMsgAbandonChallenge` with `IsQuitting` false.
     pub fn take_abandon_confirmed(&mut self) -> bool {
         std::mem::take(&mut self.abandon_confirmed)
+    }
+
+    /// Whether Leave Challenge is offered (PC port addition).
+    pub fn set_leave_challenge(&mut self, offered: bool) {
+        self.state.leave_challenge = offered;
+    }
+
+    /// Leave Challenge's yes, which also pops the hub: the runtime leaves the round for the
+    /// pre-game lobby.
+    pub fn take_leave_challenge_confirmed(&mut self) -> bool {
+        std::mem::take(&mut self.leave_challenge_confirmed)
     }
 
     /// `QuitPopupCallback`'s save (`0x82671678`): the hub's input blocked and its screen hidden
@@ -656,6 +715,10 @@ impl PauseMenuController {
                         self.abandon_confirmed = true;
                         self.state.visible = false;
                     }
+                    HubPopup::LeaveChallenge => {
+                        self.leave_challenge_confirmed = true;
+                        self.state.visible = false;
+                    }
                     HubPopup::Quit | HubPopup::QuitNoDataLoss => self.quit_confirmed = true,
                 }
             }
@@ -702,6 +765,7 @@ impl PauseMenuController {
             PauseMenuOption::Quit => Some(HubPopup::QuitNoDataLoss),
             PauseMenuOption::RestartChallenge => Some(HubPopup::RetryChallenge),
             PauseMenuOption::QuitChallenge => Some(HubPopup::QuitChallenge),
+            PauseMenuOption::LeaveChallenge if self.state.leave_challenge => Some(HubPopup::LeaveChallenge),
             _ => None,
         };
         if input.select && let Some(popup) = popup {

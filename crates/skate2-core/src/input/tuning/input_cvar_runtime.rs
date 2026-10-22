@@ -145,7 +145,7 @@ const GRIND_SURFACE_TAGS: &[(&str, i32)] = &[
     ("doNotAlign", 7),
 ];
 // Stable API indices; source initializer order is recorded separately below.
-static DEFINITIONS: [Definition; 1282] = [
+static DEFINITIONS: [Definition; 1286] = [
     Definition {
         section: "Animation",
         label: "kUseSprintButtonInput",
@@ -7918,6 +7918,12 @@ static DEFINITIONS: [Definition; 1282] = [
     Definition{section:"AI_Spawner",label:"kBigBlackSpawnHorizontalLineTestHeight",title:"Big Black spawn Horizontal Line Test Height",initial:Value::Float(1.5)},
     Definition{section:"AI_Spawner",label:"kBigBlackSpawnHorizontalLineTestBuffer",title:"Big Black spawn Horizontal Line Test Buffer",initial:Value::Float(0.5)},
     Definition{section:"Pedestrian_Navigation_Modifier_BigBlackAvoidance",label:"kDebugBigBlackAvoidanceNavModifier_AllowHandleAvoidBigBlack",title:"Allow Handle Avoid BigBlack",initial:Value::Boolean(true)},
+    //1282: native spectator initializer82f89d20, integer range1..50.
+    Definition{section:"LivingWorld_Spectator",label:"kMaxNumForceSpectators",title:"Max Num Force Spectator",initial:Value::Integer{value:24,minimum:1,maximum:50}},
+    //1283..1285: crowd presentation initializers82f6b8f8/b948/b9a8, floats-10000..10000.
+    Definition{section:"Render_Debug_Crowd",label:"kCrowdPresEnable",title:"Enable",initial:Value::Boolean(true)},
+    Definition{section:"Render_Debug_Crowd",label:"kCrowdImposterPN",title:"Projection Near",initial:Value::Float(-10.)},
+    Definition{section:"Render_Debug_Crowd",label:"kCrowdImposterPF",title:"Projection Far",initial:Value::Float(10.)},
 ];
 const CVAR_COUNT: usize = DEFINITIONS.len();
 #[path = "input_cvar_camera_anchor.rs"]
@@ -8074,6 +8080,8 @@ const REGISTRATION_ORDER: [usize; CVAR_COUNT] = [
     1258, // Unique section/label; no existing target alias.
     1259,1260,1261,1262,1263,1264,1265,1266,1267,1268,1269,1270,1271,1272,
     1273,1274,1275,1276,1277,1278,1279,1280,1281,
+    1282, // Unique section/label; no existing target alias.
+    1283,1284,1285,
 ];
 type Target = Arc<Mutex<Value>>;
 impl InputCvarReferences {
@@ -8140,6 +8148,10 @@ impl InputCvarReferences {
             self.try_current_float(1279)?,self.try_current_float(1280)?))
     }
     pub(crate) fn try_big_black_avoidance_enabled(&self)->Result<bool,InputCvarError>{self.try_current_boolean(1281)}
+    pub(crate) fn try_max_num_force_spectators(&self)->Result<i32,InputCvarError>{self.try_current_integer(1282)}
+    pub(crate) fn try_crowd_presentation_enabled(&self)->Result<bool,InputCvarError>{self.try_current_boolean(1283)}
+    pub(crate) fn try_crowd_imposter_near(&self)->Result<f32,InputCvarError>{self.try_current_float(1284)}
+    pub(crate) fn try_crowd_imposter_far(&self)->Result<f32,InputCvarError>{self.try_current_float(1285)}
     pub(crate) fn try_pedestrian_big_black_turn_angle(&self)->Result<f32,InputCvarError>{self.try_current_float(1172)}
     pub(crate) fn try_pedestrian_vehicle_avoidance_tuning(&self)->Result<crate::pedestrian_navigation_modifiers::vehicle_avoidance::VehicleTuning,InputCvarError>{
         Ok(crate::pedestrian_navigation_modifiers::vehicle_avoidance::VehicleTuning{

@@ -75,10 +75,9 @@ pub struct Lobby {
     pub free_skate_type: bool,
     /// `sGameInfo.gameMode == GM_OnlineFreeSkate`: lobby skate.
     pub lobby_mode: bool,
-    /// `Net::IsChallengeInProgress`.
+    /// `Net::IsChallengeInProgress`: the game's challenge is on, whether the local player plays
+    /// it or waits in the pre-game lobby.
     pub challenge_in_progress: bool,
-    /// `GameManagerGame::IsGameInProgress`.
-    pub game_in_progress: bool,
     /// `mIsChangingLocation`: the host's change of challenge is counting down.
     pub changing_location: bool,
     /// `OE_PlayersSkatingWith`: the other players, by user id and name.
@@ -380,9 +379,10 @@ impl Controller {
         // others; the port has no freeskate activities, so it stays off.
         let activities = Item { title: Title::Hal("ID_ONLINE_HUB_FREESTYLE_ACTIVITES"), enabled: false, target: Target::FreeskateActivities };
         // HubStateOnlineHost::OnEvent: Host Options only while no game, proposal or change is on.
+        // The port keeps them open while a challenge runs (PC port addition), for Session Access.
         let host_options = Item {
             title: Title::Hal("ID_ONLINE_HUB_HOST_OPTIONS"),
-            enabled: lobby.host && !lobby.game_in_progress && !lobby.changing_location,
+            enabled: lobby.host && !lobby.changing_location,
             target: Target::Menu(HOST_OPTIONS),
         };
         let mut root = Menu { title: Some(Title::Literal(lobby.nickname.clone())), items: vec![friends], selected: 0 };
@@ -409,34 +409,32 @@ impl Controller {
         let list = lobby.players.iter().map(|(user_id, name)| Item { title: Title::Literal(name.clone()), enabled: true, target: Target::Peer(*user_id) }).collect();
         let selected = self.menus.get(&PLAYER_LIST).map_or(0, |menu| menu.selected.min(players.saturating_sub(1)));
         self.menus.insert(PLAYER_LIST, Menu { title: Some(Title::Hal("ID_ONLINE_HUB_PLAYER_LIST")), items: list, selected });
-        if !self.menus.contains_key(&HOST_OPTIONS) {
-            self.menus.insert(
-                HOST_OPTIONS,
-                Menu {
-                    title: Some(Title::Hal("ID_ONLINE_HUB_HOST_OPTIONS")),
-                    items: vec![
-                        Item { title: Title::Hal("ID_ONLINE_HUB_NEW_CHALLENGE"), enabled: true, target: Target::MatchSetup },
-                        Item { title: Title::Hal("ID_ONLINE_HUB_CHANGE_LOCATION"), enabled: true, target: Target::ChangeLocation },
-                        Item { title: Title::Hal("ID_ONLINEHUB_SESSIONACCESS"), enabled: true, target: Target::SessionAccess },
-                    ],
-                    selected: 0,
-                },
-            );
-        }
+        // Match Setup and Change Location wait for lobby skate while Session Access stays open
+        // during a challenge (PC port addition); the selection stays on an item still enabled.
+        let setup = !lobby.challenge_in_progress;
+        let items = vec![
+            Item { title: Title::Hal("ID_ONLINE_HUB_NEW_CHALLENGE"), enabled: setup, target: Target::MatchSetup },
+            Item { title: Title::Hal("ID_ONLINE_HUB_CHANGE_LOCATION"), enabled: setup, target: Target::ChangeLocation },
+            Item { title: Title::Hal("ID_ONLINEHUB_SESSIONACCESS"), enabled: true, target: Target::SessionAccess },
+        ];
+        let kept = self.menus.get(&HOST_OPTIONS).map(|menu| menu.selected).filter(|&selected| items.get(selected).is_some_and(|item| item.enabled));
+        let selected = kept.or_else(|| items.iter().position(|item| item.enabled)).unwrap_or(0);
+        self.menus.insert(HOST_OPTIONS, Menu { title: Some(Title::Hal("ID_ONLINE_HUB_HOST_OPTIONS")), items, selected });
         self.setup_player_menu();
         self.setup_session_access();
     }
 
     /// `Setup{Host,Client}PlayerTemplate`: the player's name; Send Friend Request and View
     /// Gamercard (Xbox LIVE's, which the port has not, so both off); the host's Kick Player in an
-    /// unranked game with no challenge on.
+    /// unranked game, which the original offers only with no challenge on and the port during one
+    /// too (PC port addition).
     fn setup_player_menu(&mut self) {
         let name = self.peer.and_then(|peer| self.peer_name(peer)).map(str::to_owned);
         let mut items = vec![
             Item { title: Title::Hal("ID_ONLINE_HUB_SEND_FRIEND_INVITE"), enabled: false, target: Target::SendFriendInvite },
             Item { title: Title::Hal("ID_ONLINE_HUB_VIEW_GAMERCARD"), enabled: false, target: Target::ViewGamercard },
         ];
-        if self.lobby.host && !self.lobby.ranked && name.is_some() && !self.lobby.challenge_in_progress {
+        if self.lobby.host && !self.lobby.ranked && name.is_some() {
             items.push(Item { title: Title::Hal("ID_ONLINE_HUB_KICK_PLAYER"), enabled: true, target: Target::KickPlayer });
         }
         let selected = items.iter().position(|item| item.enabled).unwrap_or(0);
@@ -717,6 +715,44 @@ mod tests {
         assert_eq!(access.title, Title::Hal("ID_ONLINEHUB_SESSIONACCESS_HEADER_PUBLIC"));
         assert_eq!(access.selected, 1);
         assert_eq!(hub.update(press(|input| input.select = true)), Action::SetPrivate(true));
+    }
+
+    #[test]
+    fn the_host_keeps_session_access_and_kick_player_while_a_challenge_runs() {
+        let mut playing = lobby(true, 1);
+        playing.lobby_mode = false;
+        playing.challenge_in_progress = true;
+        let mut hub = Controller::open(playing.clone());
+        let snapshot = hub.snapshot();
+        let enabled: Vec<bool> = snapshot.stack[0].items.iter().map(|(_, enabled)| *enabled).collect();
+        assert_eq!(enabled, vec![false, false, false, true, true], "no Start Challenge, but the player list and Host Options");
+        hub.ready = true;
+        hub.update(press(|input| input.select = true));
+        hub.update(press(|input| input.select = true));
+        let snapshot = hub.snapshot();
+        assert_eq!(snapshot.stack[2].items.last(), Some(&(Title::Hal("ID_ONLINE_HUB_KICK_PLAYER"), true)));
+        let mut hub = Controller::open(playing);
+        hub.ready = true;
+        hub.update(press(|input| input.down = true));
+        hub.update(press(|input| input.select = true));
+        let snapshot = hub.snapshot();
+        let options = &snapshot.stack[1];
+        assert_eq!(options.id, HOST_OPTIONS);
+        assert_eq!(options.items.iter().map(|(_, enabled)| *enabled).collect::<Vec<_>>(), vec![false, false, true], "Match Setup and Change Location wait");
+        assert_eq!(options.selected, 2, "on Session Access");
+        hub.update(press(|input| input.up = true));
+        assert_eq!(hub.snapshot().stack[1].selected, 2, "the greyed items are passed over");
+        hub.refresh(lobby(true, 1));
+        let snapshot = hub.snapshot();
+        assert_eq!(snapshot.stack[1].items.iter().map(|(_, enabled)| *enabled).collect::<Vec<_>>(), vec![true, true, true], "back in lobby skate");
+        assert_eq!(snapshot.stack[1].selected, 2);
+        let mut waiting = lobby(true, 1);
+        waiting.challenge_in_progress = true;
+        assert!(!Controller::open(waiting).snapshot().stack[0].items[1].1, "a host waiting in the pre-game lobby starts nothing while the challenge runs");
+        let mut changing = lobby(true, 1);
+        changing.challenge_in_progress = true;
+        changing.changing_location = true;
+        assert!(!Controller::open(changing).snapshot().stack[0].items[4].1, "nothing while a change counts down");
     }
 
     fn single_player(kind: HubKind) -> Controller {

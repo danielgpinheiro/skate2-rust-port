@@ -1257,8 +1257,9 @@ A temporary example built the `PlayAmbience` voice on a bare `AudioCore` with th
     * `Traffic_Horn.abk` and `Traffic_Skid.abk`;
     * `car_alarms.abk`, from `emitters2.big`.
   * The port loads them at `EnterWorld` after the other banks (app `VEHICLE_BANKS`).
-* Not ported: the crowd/vehicle bank exclusivity (`UnloadCrowdData` and the load status);
-  `DEBUG_TRAFFIC_CAR_CONNECTIONS`; the `xcore` asserts.
+* The crowd/vehicle bank exclusivity is ported (`UnloadCrowdData`, `LoadCrowdsData` and both
+  load statuses, `system_contest.rs`).
+* Not ported: `DEBUG_TRAFFIC_CAR_CONNECTIONS`; the `xcore` asserts.
 
 ## Pedestrians (world/pedestrian.rs, world/pedestrian_sfx.rs)
 
@@ -1426,10 +1427,29 @@ A temporary example built the `PlayAmbience` voice on a bare `AudioCore` with th
     emitter swap whose memory they share) and sets the multi-speaker mode.
   * `TriggerMissionMusicImp` 0x824ff234 starts the crowds.
   * Crowd and speaker volumes need challenge game states.
-* With no challenge, `CSTATEMGR_Crowd`'s key is 0 (`PlayCrowdSound` from `CheckForScore` returns
-  at once) and `mStartCrowds` is false. `CSTATEMGR_Speaker` stays out of multi-speaker mode with
-  no `MultiSpeaker` voices. No state of either attaches, so their passes do nothing. The modules
-  document what remains to port with addresses.
+* Crowds are ported (`world/crowd.rs`, `system_contest.rs`):
+  * `PlayMissionSFX` contest load and unload, the crowd banks of `crowds.big` (asset bank 14),
+    `mbPlayArenaOnLoad`, `TriggerMissionMusic` (contest and race) and `StartCrowds`.
+  * The five `CSTATE_Crowd`s with `SFXObj_Crowd` and `SFXCTL_3DCrowdPos`, attached to the
+    nearest spectator groups (`CacheCrowdPodInfos`, thirty within 1000).
+  * `PlayCrowdSound` from `CheckForScore` (the local skater's score change and bails).
+* With no challenge, `CSTATEMGR_Crowd`'s key is 0 (`PlayCrowdSound` returns at once) and
+  `mStartCrowds` is false.
+* Speakers are ported (`world/speaker.rs`). A contest load sets `CSTATEMGR_Speaker`'s
+  multi-speaker mode off line; its next `UpdateParams` 0x82557d58:
+  * frees the speech characters' delay voices and builds two `MultiSpeaker`s (speech, music),
+    each a `SubMix` sending to four `Speaker` voices (gain, high pass, delay, low pass, notch,
+    pan, send to the speech or music master; `aud_general` "multispeaker" sets the delays);
+  * connects the speech voices instance's stream 0 to the speech `MultiSpeaker`;
+  * then matches the first four speaker volumes to the four `CSTATE_Speaker`s by identifier.
+* Each attached speaker: `SFXCTL_SpeakerPhysics` delays each type by the camera's distance over
+  the speed of sound (held for "multispeaker"'s update count) and sets its pan distance and
+  nicotine distance; `SFXObj_Speaker` sets the gain, filters (a large arena's own outputs) and
+  azimuth notch from the mixer and the volume's `aud_emitter` graphs.
+* The contest's unload clears the mode: the speech stops and returns to the speech master, the
+  states detach (their speakers silenced), the voices are freed and the delay voices return.
+* A released `SubMix` unlinks every `Send` and `Route` still connected to it
+  (`SubMix::ReleaseEvent` 0x82bfc2d8), as when the music still routes to a freed `MultiSpeaker`.
 
 ## Emitter host inputs
 
@@ -2075,7 +2095,7 @@ per channel set, the FX `Send` and the dry `Send`. `Play` 0x829c0f08 queues the 
   channel sets 0-2 (six channels) and 3 (one). Every call removes the sets, sets the dry level
   (`kStraightToDac`, `kApplyDSP`), routes set 3 to `GlobalEffects`' "EnvSendSub" at volume 0
   (`kGlobalReverb`), then the preset: stereo (dry 127 into DSP voice 0), contest iPod (set 2 to
-  `CSTATEMGR_Speaker::GetMultiSpeakerSubmix(eSpeakerType_Music)` off line), DJ location (set 0 into
+  the music master on line, else `CSTATEMGR_Speaker::GetMultiSpeakerSubmix(eSpeakerType_Music)`), DJ location (set 0 into
   DSP voice 0, set 1 with channels 0/2 to 4/3 into DSP voice 1, set 2 to the music master). Each
   set's send goes to the submix `SetDrySubmixPlugin` holds at the time.
 * DSP (music/dsp.rs): `MusicDspVoice` `CreateDspSubMix` (stage 2: `SubMix`, `Delay` for voice 1,
@@ -2168,7 +2188,6 @@ A temporary probe outside the workspace (the app's `load_system`, `GameStreamFil
 * The chyron display (`FrontEndManager::mChyron.Display`), the music player (`MusicPlayerManager`,
   custom playlists, the profile music mode) and user (XMP) music.
 * `VuMeter` and `GetMusicVU`, so `SFXObj_VU` input 0 stays 0.
-* The multi-speaker music submix of contest venues (`CSTATEMGR_Speaker` has no voices).
 * Pathfinder RAM (bank) tracks: sub-bank loading, `PATHI_choosesynchtime` beat synchronisation and
   the bank actions, which the stream tracks do not use.
 

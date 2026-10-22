@@ -172,6 +172,13 @@ impl SimulationCommandRandom {
     pub(crate) fn try_range(&mut self, minimum:f32, maximum:f32)->Result<f32,NativeRandomLocked>{
         self.random.try_living_world_range(&self.gate,minimum,maximum)
     }
+    /// `Simulation::GetRandom` 0x8289e808 as `IRandom::GetRandom` within the simulation update,
+    /// which `SimController::Update1` 0x828a74f0 unlocks: the challenge crowd generators' jitter.
+    #[expect(clippy::cast_precision_loss, reason = "the native unsigned conversion")]
+    pub(crate) fn range(&mut self, minimum: f32, maximum: f32) -> f32 {
+        let product = self.random.next_value() as f32 * (maximum - minimum);
+        product.mul_add(f32::from_bits(0x2f80_0000), minimum)
+    }
 }
 #[cfg(test)]
 #[path = "native_skater_random_tests.rs"]

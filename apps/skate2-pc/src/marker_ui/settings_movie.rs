@@ -263,7 +263,8 @@ impl SettingsMovie {
 }
 
 /// `CreateOptions`/`UpdateItemValue`: the row's title, then a slider's `ID_COMMON_PERCENT` of
-/// `GetIntegerValue * 10` or a selector's ON/OFF, or the PC Frame Rate Cap's value.
+/// `GetIntegerValue * 10` or a selector's ON/OFF, or the PC Frame Rate Cap's or Resolution
+/// Scale's value.
 fn options_row(assets: &Assets, state: &Snapshot, row: Row) -> RenderResult<EditSkaterRow> {
     let title = row.title();
     let title = if title.starts_with("ID_") { assets.localize(title)? } else { title.into() };
@@ -276,6 +277,8 @@ fn options_row(assets: &Assets, state: &Snapshot, row: Row) -> RenderResult<Edit
     let (subtitle, value) = if let Some(value) = volume {
         let percent = localizer::localized_format_string(assets, "ID_COMMON_PERCENT", &[localizer::AptArgument::Integer(value * 10)])?;
         (String::from_utf16_lossy(&percent), value)
+    } else if row == Row::ResolutionScale {
+        (format!("{}%", state.values.resolution_scale), 0)
     } else if row.kind() == "selector" {
         let on_off = |on: bool| if on { "ID_COMMON_ON" } else { "ID_COMMON_OFF" };
         let text = match row {
@@ -283,6 +286,7 @@ fn options_row(assets: &Assets, state: &Snapshot, row: Row) -> RenderResult<Edit
             Row::Fisheye => on_off(state.values.fisheye),
             Row::FpsCounter => on_off(state.values.fps_counter),
             Row::Fullscreen => on_off(state.values.fullscreen),
+            Row::VSync => on_off(state.values.vsync),
             Row::Subtitles => on_off(state.subtitles),
             Row::GrindTransparency => on_off(state.grind_transparency),
             Row::MiniMap => on_off(state.mini_map),
@@ -337,6 +341,22 @@ pub(super) fn action(clip: &mut Clip, offset: usize) -> RenderResult<()> {
 mod tests {
     use super::*;
     use skate2_formats::mount::{MountSet, MountedBig, SKATE2_ARCHIVES};
+
+    /// The selector row `item` shows `label`, every glyph of which its font maps.
+    fn selector_value(movie: &mut SettingsMovie, assets: &Assets, item: &str, label: &str) {
+        let field = movie.root.named(&[item, "mSubtitle", "TEXTLABEL"]).unwrap();
+        assert_eq!(String::from_utf16(field.text.as_ref().unwrap()).unwrap(), label);
+        let skate2_formats::apt::Character::Text(text) = field.definition(assets).unwrap() else {
+            panic!("selector subtitle is not text");
+        };
+        let Some(skate2_formats::apt::Character::Font { name, .. }) =
+            assets.movies[field.asset].movie.characters[text.font_id as usize].as_ref()
+        else {
+            panic!("selector subtitle font absent");
+        };
+        let font = assets.apt_font(name).unwrap();
+        assert!(label.encode_utf16().all(|unit| font.metrics.mapped_glyph(unit).is_some()), "{label}");
+    }
 
     #[test]
     #[ignore = "requires external SKATE2_GAME_ROOT"]
@@ -487,19 +507,15 @@ mod tests {
                 ] {
                     state.values.frame_rate_cap = frame_rate_cap;
                     movie.update(&assets, state, main.as_mut()).unwrap();
-                    let field = movie.root.named(&["mItem2", "mSubtitle", "TEXTLABEL"]).unwrap();
-                    assert_eq!(String::from_utf16(field.text.as_ref().unwrap()).unwrap(), label);
-                    let skate2_formats::apt::Character::Text(text) = field.definition(&assets).unwrap() else {
-                        panic!("selector subtitle is not text");
-                    };
-                    let Some(skate2_formats::apt::Character::Font { name, .. }) =
-                        assets.movies[field.asset].movie.characters[text.font_id as usize].as_ref()
-                    else {
-                        panic!("selector subtitle font absent");
-                    };
-                    let font = assets.apt_font(name).unwrap();
-                    assert!(label.encode_utf16().all(|unit| font.metrics.mapped_glyph(unit).is_some()), "{label}");
+                    selector_value(&mut movie, &assets, "mItem2", label);
                 }
+                // So does every Resolution Scale.
+                for scale in skate2_core::ui::options::RESOLUTION_SCALES.step_by(10) {
+                    state.values.resolution_scale = scale;
+                    movie.update(&assets, state, main.as_mut()).unwrap();
+                    selector_value(&mut movie, &assets, "mItem4", &format!("{scale}%"));
+                }
+                state.values.resolution_scale = 100;
                 // Render the real retained movie at normal and ultrawide sizes.
                 let letterbox = shown(&mut movie, &mut main).clip.clone();
                 for size in [(1280, 720), (2560, 720)] {

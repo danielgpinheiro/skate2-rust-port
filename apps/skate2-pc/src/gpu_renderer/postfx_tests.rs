@@ -57,6 +57,7 @@ fn gpu_native_cube_channels_and_bloom_composition() {
         hom: Default::default(),
         bloom_sample_offset: 0.,
         watermark_position: [0.;2],
+        deck_ao: [0.; 4],
     };
     for (cinematic, bloom, expected) in [
         (false, [1., 0., 0., 0., 0.], [72i32, 144, 216]),
@@ -113,7 +114,7 @@ fn gpu_native_cube_channels_and_bloom_composition() {
                 occlusion_query_set: None,
             });
         }
-        post.record(&queue, &mut encoder, &output.view, &assets, &frame, None)
+        post.record(&device, &queue, &mut encoder, &output.view, wgpu::TextureFormat::Rgba8Unorm, &assets, &frame, None, None)
             .unwrap();
         let read = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -175,7 +176,7 @@ fn gpu_native_cube_channels_and_bloom_composition() {
     let mut first = None;
     for _ in 0..4 {
         let mut encoder = device.create_command_encoder(&Default::default());
-        post.record(&queue, &mut encoder, &output.view, &assets, &frame, None).unwrap();
+        post.record(&device, &queue, &mut encoder, &output.view, wgpu::TextureFormat::Rgba8Unorm, &assets, &frame, None, None).unwrap();
         queue.submit(Some(encoder.finish()));
         post.after_submit();
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();

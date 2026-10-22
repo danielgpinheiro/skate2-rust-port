@@ -304,6 +304,8 @@ pub struct SelectedVisualSnapshot<'a> {
     pub dynamic_objects: Vec<crate::SelectedDynamicObjectVisual>,
     pub vehicles: Vec<crate::SelectedVehicleVisual>,
     pub pedestrians: Vec<crate::SelectedPedestrianVisual>,
+    /// `CrowdPresentation`'s imposter targets and imposters.
+    pub crowd: crate::SelectedCrowdVisual,
     /// `ChaseArrowMan`'s arrows after this tick's front-end update.
     pub chase_arrows: Vec<crate::ui::chase_arrows::Arrow>,
     /// The running NIS's scene characters with their own renderables.
@@ -402,6 +404,9 @@ pub struct SelectedSkaterVisual<'a> {
     pub entity_type: u32,
     /// Its `m_Recipe` is the player's (`SkaterPresentation::GetPlayerRecipeID` 0x827dd270).
     pub players_recipe: bool,
+    /// An online challenge's player that a player waiting in its pre-game lobby watches (PC
+    /// port addition): drawn as a ghost at its `opacity`, with no deck shadow.
+    pub lobby_ghost: bool,
 }
 
 /// The name `SkaterPresEntity::DrawName` (0x827d7fe0) draws over a skater: its constructor
@@ -2062,6 +2067,10 @@ impl<T, C> SelectedLiveSession<T, C> {
             self.update_trick_guide(frontend_input,policy.has_focus)?;
             return Ok(SelectedQueuedFrameOutcome::Frontend);
         }
+        if self.career.as_mut().is_some_and(career::CareerSession::take_hom_replay_editor) {
+            self.open_hom_results_replay_editor()?;
+            return Ok(SelectedQueuedFrameOutcome::Frontend);
+        }
         if self.replay_editor_pending {
             if self.frontend_fade.covered() {
                 self.replay_editor_pending=false;
@@ -2265,10 +2274,26 @@ impl<T, C> SelectedLiveSession<T, C> {
                 trace_travel(&mut self.map_travel_gate, "the fade");
                 return Ok(SelectedQueuedFrameOutcome::Frontend);
             }
-            let position = [transform[12], transform[13], transform[14]];
+            let mut transform = transform;
             let terrain = self.inner.terrain.as_mut().expect("ready terrain");
             terrain.try_advance_asset_release()
                 .map_err(|e| SelectedLiveError::failed(Stage::TerrainResident, e))?;
+            // A destination the simulation stream holds nothing at cannot be landed on (no number,
+            // or another world's location, such as the training facility's, which the port does not
+            // load): the travel ends where the skater is, which the focus holds.
+            let destination = [transform[12], transform[13], transform[14]];
+            if !terrain.landable(destination).map_err(|e| SelectedLiveError::failed(Stage::TerrainResident, e))? {
+                let here = terrain.focus_position()
+                    .ok_or_else(|| SelectedLiveError::failed(Stage::TerrainResident, "travel destination outside the stream and no focus held"))?;
+                eprintln!("travel: the simulation stream holds nothing at {destination:?}; the travel ends at {here:?}");
+                if transform[..12].iter().any(|value| !value.is_finite()) {
+                    transform[..12].copy_from_slice(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+                }
+                transform[12..15].copy_from_slice(&here);
+                transform[15] = 1.0;
+                self.map_travel = Some(transform);
+            }
+            let position = [transform[12], transform[13], transform[14]];
             let ready = terrain.try_prepare_teleport(position)
                 .map_err(|e| SelectedLiveError::failed(Stage::TerrainResident, e))?;
             if !ready {
@@ -2635,6 +2660,7 @@ impl<T, C> SelectedLiveSession<T, C> {
             crate::player::PlayerLoadPhase::Loaded { .. }
         );
         self.pause_menu.set_main_challenge(self.career.as_ref().and_then(career::CareerSession::start_hub_main_challenge));
+        self.pause_menu.set_leave_challenge(self.online.can_leave_challenge());
         // StateManagerFrontEnd::ReceiveInput 0x82656af8: nothing reaches the StartHub before its
         // screen's IntroComplete, and a front-end state over the game takes the input itself.
         let frontend_input = if self.pause_menu.awaiting_intro() || career_overlay_open {
@@ -2721,6 +2747,9 @@ impl<T, C> SelectedLiveSession<T, C> {
         }
         if was_paused || pause.visible {
             self.update_start_hub(pause.hub)?;
+            if self.pause_menu.take_leave_challenge_confirmed() {
+                self.online_request_leave_challenge();
+            }
             if was_paused && pause.visible && !pause.jacked && policy.has_focus && frontend_input.select
                 && !self.pause_menu.awaiting_intro()
                 && self.pause_menu.selected_option()==crate::ui::pause_menu::PauseMenuOption::TrickGuide
@@ -3934,6 +3963,14 @@ impl<T, C> SelectedLiveSession<T, C> {
         output.try_audio_phys_out().ok()
     }
 
+    /// `GlobalData`'s network-game bit (`AudioSystem::mbIsOnlineGame`): `sGameInfo.isNetworkGame`.
+    #[must_use]
+    pub fn audio_online_game(&self) -> bool {
+        let Some(owner) = self.inner.world.as_ref() else { return false };
+        let Ok(world) = owner.world.lock() else { return false };
+        world.local_skater_identity.as_ref().is_some_and(|identity| identity.backend().try_is_network_game().unwrap_or(false))
+    }
+
     /// The SkaterManager's Actor whose player ID is `GetLocalSimIndex`.
     fn audio_local_actor(&self) -> Option<std::sync::Arc<crate::actor_construction::ActorConstruction>> {
         let local = self.inner.world.as_ref()?.world.lock().ok()?.local_skater_identity.clone()?;
@@ -4212,6 +4249,19 @@ impl<T, C> SelectedLiveSession<T, C> {
         Ok(visual)
     }
 
+    /// The crowd presentation's targets and imposters (`CrowdPresentation::RenderCrowdTargets`,
+    /// `RenderCrowdImposters`).
+    fn crowd_visual(&self) -> Result<crate::SelectedCrowdVisual, SelectedLiveError> {
+        use SelectedLiveStage as Stage;
+        let assets = self.inner.assets.as_ref().ok_or(SelectedLiveError::Pending(SelectedLivePending::FrameNotReady))?;
+        let player = self.inner.player.as_ref().ok_or(SelectedLiveError::Pending(SelectedLivePending::FrameNotReady))?;
+        let Some(actor) = player.selected.actor.as_ref() else {
+            return Ok(crate::SelectedCrowdVisual::default());
+        };
+        let recipes = player.selected.owners.living_world_recipes.lock().map_err(|e| SelectedLiveError::failed(Stage::Visual, e))?;
+        recipes.crowd_visual(&assets.vault, &assets.cvars, actor).map_err(|e| SelectedLiveError::failed(Stage::Visual, e))
+    }
+
     pub(super) fn recorded_world_visuals(&self)->Result<replay_session::RecordedWorld,SelectedLiveError> {
         use SelectedLiveStage as Stage;
         let cvars=&self.inner.assets.as_ref().ok_or_else(||SelectedLiveError::failed(Stage::Visual,"assets absent"))?.cvars;
@@ -4397,6 +4447,7 @@ impl<T, C> SelectedLiveSession<T, C> {
             dynamic_objects,
             vehicles,
             pedestrians,
+            crowd: self.crowd_visual()?,
             chase_arrows: self.try_chase_arrows().map_err(|e| SelectedLiveError::failed(Stage::Visual, e))?,
             scene_characters: self.career.as_ref().map(career::CareerSession::scene_visuals).unwrap_or_default(),
             party_skaters: {
@@ -4545,6 +4596,18 @@ fn nis_ground_line(
 /// `Sim_LocalPlayerStreamerController::UpdateStreamer` (`0x8277d4d0`) reads
 /// `SkaterManager::GetLocal`: the skater at `mLocalIndex`, the selected one until Party
 /// Play's `SetLocalIndex` moves it.
+/// `TriggerMissionMusic` 0x82504f28's countdown `CacheCrowdPodInfos` 0x824fd6c0: the spectator
+/// groups around the local skater.
+fn crowd_pod_infos(
+    world: &Arc<std::sync::Mutex<crate::physical_player_assembly::PhysicalAssemblyWorld>>,
+    selected: &crate::actor_construction::ActorConstruction,
+) -> Vec<([f32; 4], i32)> {
+    let Ok(position) = local_skater_position(Some(world), selected) else { return Vec::new() };
+    let Ok(world) = world.lock() else { return Vec::new() };
+    let Ok(living) = world.grind_services.living_world().lock() else { return Vec::new() };
+    living.props.as_ref().and_then(|props| props.crowd_pod_infos([position[0], position[2]]).ok()).unwrap_or_default()
+}
+
 fn local_skater_position(
     world: Option<&Arc<std::sync::Mutex<crate::physical_player_assembly::PhysicalAssemblyWorld>>>,
     selected: &crate::actor_construction::ActorConstruction,

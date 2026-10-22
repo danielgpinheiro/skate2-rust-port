@@ -464,7 +464,8 @@ review yet.
 | `trafficlight_one`/`_two` | 4-8 | diffuse | `g_TrafficLightsStatus_1/2`; no blend, no alpha test, RGB. Unverified writer lead: `WorldPresentation::DoSimSubmit` calls `TrafficLight::GetCurrentState` / `GetCurrentPedState` |
 | Skater cloth (ROPA) | - | The `*_ropa` parts (tutorial_male's hoodie) become a CPU cloth simulation after `ClothInit` 0x827d7d88: `ROPA::Effect` particles, constraints, bone drivers and sphere/tube/plane collision, gated by `cv_EnableRopa`. The port only draws their GPU branch, so sleeves can intersect arms |
 | Character effects (`defaultcharacter`, `cac_*`, `*_ropa`, hair, ...) | - | Character colour is diagnostic. The pass states are original: CULLMODE for every pass, the `ghost` passes, and `defaulthair`'s 3 `default` passes with alpha `i_alpha`(UV1) * `i_params[0].x`. Lighting (`CalculateCharacterLighting`, SH irradiance) is not ported |
-| Living world / vehicles (`defaultlivingworld`, `vehicle*`, `crowdimposter`) | - | Not started |
+| Living world / vehicles (`defaultlivingworld`, `livingworld_stamp`, `vehicle*`) | - | `pedestrian_render.rs`, `vehicle_render.rs` |
+| Crowd imposters (`crowdimposter`, livingworld_stamp `crowd`) | - | `gpu_renderer/crowd.rs`. `RenderCrowdTargets` (after the shadow cascades) draws each target's no-sim pedestrian into a 364x310 cell of a 1280x720 atlas with the `crowd` technique (livingworld_stamp's own pass; other effects fall back to `default`), the pass's stencil 255 resolved into a mask. `RenderCrowdImposters` (after the 3D front end, before the particles) draws camera-facing quads: colorized by the texel's alpha, fogged, toned, alpha from the mask, alpha test 30, SRCALPHA/INVSRCALPHA, depth write |
 
 **Systems:**
 
@@ -479,8 +480,28 @@ review yet.
 - **Shadows still missing.** The world-shadow pass (`m_pWorldShadowMap`,
   `CalculateWorldShadow`) and character self-shadowing need the character
   lighting port. DMOs, pedestrians and other skaters cast once they are
-  rendered (vehicles never cast). `PostFX::RenderAOBoxes` 0x828465b0 draws a
-  deck AO box under each skater (post-FX, not sun-driven).
+  rendered (vehicles never cast).
+- **Deck AO.** `PostFX::RenderAOBoxes` 0x828465b0 (`gpu_renderer/deck_ao.rs`): after the
+  uber or visual FX pass, a box (0.2 x 0.2 x 0.6 of the deck matrix, `GetDeckMatrix`: the
+  `skateboard_root` pose, hips and root) under each skater the game state draws multiplies the
+  target by `deckao_PS`: the depth's camera-space point in deck space samples
+  `board_occlusion.Texture` (x, z times `DeckAO_XLen`/`ZLen`), lightened by the height
+  (`DeckAO_HeightFallOff`), the stencil (characters stay unshaded) and a positive first bloom
+  coefficient. `g_FOV` comes from the drawn projection, so other window shapes match. The
+  bone is found by name in the presentation hierarchy (`InitAnimation` 0x827e1d54). The
+  texture is read through `m_pLinearClampSamplerState` (`PostFX::Init` 0x8284a8b8): mip
+  filter `D3DTEXF_NONE` (2 on the 360, the base map), so every fetch uses the full-size level
+  and a point off the board clamps to the white border; sampling the smaller mips instead
+  greys the whole box far away. With MSAA each depth and stencil sample is shaded and the
+  pixel takes their mean, so a character's edge pixels are not shaded as all ground.
+  PC deviation: the darkening (one minus the original's factor) is 1.2 times the original's
+  (`STRENGTH` in `deckao_PS`'s port), and with PostFX off the boxes still draw, into the scene the
+  frame drew directly, with the camera planes' depth constants and no bloom term.
+  `board_occlusion.Texture` (32x64 R5G6B5, unsigned) is kept resident with the other
+  `globaltextures.rx2` PostFX textures; `SetTexturePointers` 0x82828728 leaves it null when
+  absent. With the shipped values (XLen 1.6, ZLen 0.9, HeightFallOff 5) and the ground about
+  6 cm below `skateboard_root`, a rolling board darkens the ground under its centre to about
+  0.6 of its colour, mostly hidden under the deck from the usual camera.
 - **Other globals:** `g_vCubeMapCentre`, `g_vViewDir`, `g_gammapower`.
 - **Character part order.** Inverse binds fill in `BuildTInstanceArray`'s
   component-name hash order (09-27). Its Beard skip (no Beard when a
@@ -508,8 +529,39 @@ review yet.
   port's resolution, as the hardware defines it.
 - **PC enhancements:**
   - anisotropy 16 instead of the manifests' 4;
-  - 4x MSAA (`SKATE2_NO_MSAA` gives 1x);
-  - `SKATE2_NO_VSYNC` for uncapped presentation.
+  - Resolution Scale (Display Settings, 50% to 200% in steps of 10, saved in the display
+    chunk, version 6): the scene's depth, MSAA colour, PostFX and final-pass scene targets are
+    that percentage of the render size (the longer side capped at the device's largest
+    texture). `Blit_ToDeviceRT` brings it to the window: one sample at or below 100%, above it
+    four warped samples a quarter of a window pixel apart (exactly the 2x2 texels at 200%). The
+    HUD, movies and fades draw on the window afterwards. A frame without a final blit renders at
+    100%, and a scale the GPU cannot allocate falls back to 100% until the setting changes. At
+    100% every target and the blit are as before;
+  - 4x MSAA (`SKATE2_NO_MSAA` gives 1x); the character programs interpolate their
+    attributes at the centroid, so an edge pixel whose centre lies off the triangle does not
+    sample past the surface (UVs, normals, the shadow lookup's world position);
+  - VSync (Display Settings, display chunk version 7; earlier saves take it from their cap,
+    whose Refresh Rate alone used to wait for the refresh): on presents Fifo, off Immediate
+    (else Mailbox). The Frame Rate Cap applies either way: 60 and 120 wait in `FrameCap`, and
+    Refresh Rate without VSync waits the monitor's interval (`refresh_rate_millihertz`, read
+    again each second, 60 Hz when unknown). While the window does not have the focus, VSync
+    presents as off and `FrameCap` waits at least the monitor's interval instead: a Fifo
+    swapchain whose window another one covers can stop taking frames, and a frame held in
+    its present holds the simulation (the SIM thread's next tick waits for the window to
+    take the last one), long enough online for the server to drop the game as frozen;
+  - `SKATE2_NO_VSYNC` for uncapped presentation (VSync off, no cap).
+- **Backends.** Every wgpu backend is allowed (Vulkan first, then DX12), and the DX12 shaders
+  compile with FXC, which ships with Windows: wgpu's automatic choice takes any `dxcompiler.dll`
+  on the PATH (a Vulkan SDK's, say), and an old one without `dxil.dll` fails every shader, so the
+  device never starts. `WGPU_BACKEND`, `WGPU_DX12_COMPILER` and wgpu's other variables override;
+  `SKATE2_WGPU_LOG` prints wgpu's warnings and errors, with `WGPU_VALIDATION=1` also the
+  validation layer's. A panic in the window thread shows the error, the adapter and the crash
+  report's path in a message box.
+- **Bundled draws and the stencil reference.** wgpu sends the stencil reference to the driver
+  only while a pipeline that reads it is bound, and replaying a render bundle binds its pipelines
+  without it. `WorldShadowView::Render` binds the world caster pipeline before setting
+  `COVERAGE_STENCIL` and executing its bundle; otherwise every bundled caster draws with an unset
+  reference (Vulkan validation: `VUID-vkCmdDrawIndexed-commandBuffer-02701`).
 - **Precision and filtering:** `half` is evaluated as f32; there is no
   TRILINEARTHRESHOLD equivalent.
 - **Composite alpha:** the surface is non-sRGB and prefers Opaque composite

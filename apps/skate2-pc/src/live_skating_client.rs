@@ -333,6 +333,9 @@ pub(crate) fn run(root: &std::path::Path) -> RenderResult<()> {
     if (controls_demo.is_none() && !ollie_demo && completion_limit.is_none())
         || matches!(controls_demo,Some(ControlsDemo::MainMenu|ControlsDemo::MainMenuRoundtrip|ControlsDemo::MainMenuGameplay|ControlsDemo::MainMenuFreeskate|ControlsDemo::DisplaySettings|ControlsDemo::Career)) {
         session.start_main_menu(&mounts)?;
+        if let Some(changelog) = crate::game_update::changelog() {
+            session.show_changelog(changelog);
+        }
     }
     let presented_completion_counter = Arc::new(AtomicU64::new(0));
     let client = LiveSkatingClient {
@@ -1176,6 +1179,7 @@ impl LiveSkatingClient {
             danny_way_jam,
             player_providing_input,
             player_is_male,
+            online_game: self.session.audio_online_game(),
             ..Default::default()
         };
         // The front end's simulation keeps running; DoSimSubmit submits its AI skaters.
@@ -2436,7 +2440,8 @@ impl LiveSkatingClient {
                         let store=skate2_core::edit_skater_profile::EditSkaterProfileStore::open(
                             skate2_core::edit_skater_profile::EditSkaterProfileStore::default_path()?)?;
                         let expected=skate2_core::ui::options::PcDisplaySettings{postfx:false,fisheye:false,
-                            frame_rate_cap:skate2_core::ui::options::FrameRateCap::Fps60,fps_counter:false,fullscreen:false};
+                            frame_rate_cap:skate2_core::ui::options::FrameRateCap::Fps60,fps_counter:false,fullscreen:false,
+                            resolution_scale:100,vsync:true};
                         if display.page!=skate2_core::ui::options::Page::Hidden
                             || display.values!=expected || store.load_display_settings()?!=expected {
                             return Err("Display Settings main-menu save roundtrip failed".into());
@@ -3251,7 +3256,17 @@ impl LiveSkatingClient {
         } else if !self.gameplay && self.session.career_overlay_open() {
             changed = true;
             // FrontEndState_Unlock pauses the game; only the front end runs.
-            if let Some(career) = self.session.take_career_hud() {
+            if self.session.frontend_scene_reveal_pending() {
+                // The Replay Editor pops back to the Hall of Meat results: the retained
+                // world is drawn again through the game camera before the reveal.
+                let career = self.session.take_career_hud();
+                let pause = self.session.pause_menu_snapshot();
+                let map = self.session.map_menu_snapshot();
+                let mut visual = self.session.try_nis_visual_snapshot()?;
+                let replay = self.session.replay_restorer();
+                view.update(renderer, scene, now, &mut visual, &pause, &map, &[], None, career.as_ref(), None, replay)?;
+                self.session.acknowledge_frontend_scene_ready();
+            } else if let Some(career) = self.session.take_career_hud() {
                 view.update_career_frontend(renderer, scene, now, &career)?;
             }
             self.acknowledge_career_screens(view);

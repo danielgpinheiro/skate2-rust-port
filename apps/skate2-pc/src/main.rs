@@ -212,6 +212,7 @@ mod gpu_renderer;
 mod career_photos;
 mod replay_media;
 mod media_encoder;
+mod gpu_log;
 mod panic_report;
 mod game_root;
 mod game_update;
@@ -246,6 +247,7 @@ mod particle_view;
 
 fn main() -> ExitCode {
     panic_report::install();
+    gpu_log::install();
     // This executable's build (its build script's secret): its server and its client meet only
     // the same build.
     let build = skate2_net::crypto::Build::from_hex(env!("SKATE2_BUILD_SECRET")).unwrap_or(skate2_net::crypto::Build::DEVELOPMENT);
@@ -268,17 +270,18 @@ fn main() -> ExitCode {
             }
         };
     }
-    // A launch with no arguments is a player's: the game, quiet, asking for the game's folder
-    // when it is not known yet and showing a fatal error in a message box.
+    // A player's launch (no arguments, or only `--changelog`): the game, quiet, asking for the
+    // game's folder when it is not known yet and showing a fatal error in a message box.
     {
-        let player = env::args().len() == 1;
+        let player = game_update::player_launch();
         if player || env::args().any(|argument| argument == "--live-skating") {
             skate2_core::diagnostics::set_quiet(player || env::args().any(|argument| argument == "--quiet"));
             skate2_core::diagnostics::read_trace::install();
             let failed = |error: String| {
                 std::eprintln!("controlled skating test failed: {error}");
                 if player {
-                    game_root::show_error(&format!("Skate 2 stopped because of an error:\n\n{error}"));
+                    let gpu = panic_report::gpu().map(|gpu| format!("\n\nGPU: {gpu}")).unwrap_or_default();
+                    game_root::show_error(&format!("Skate 2 stopped because of an error:\n\n{error}{gpu}"));
                 }
                 ExitCode::FAILURE
             };
@@ -12778,6 +12781,13 @@ fn load_boot_presentation_collection(
         boot_textures.push(skate2_core::mounted_character_scene::own_texture_asset(
             &arena, &resources, skate2_formats::hash::rw_hash64_string(name),
         ).map_err(|error| format!("{name}: {error}"))?);
+    }
+    // PostFX::SetTexturePointers 0x828288bc..0x8282890c: the deck AO texture, which the
+    // original leaves null when the arena lacks it.
+    if let Ok(texture) = skate2_core::mounted_character_scene::own_texture_asset(
+        &arena, &resources, skate2_formats::hash::rw_hash64_string("board_occlusion.Texture"),
+    ) {
+        boot_textures.push(texture);
     }
     let boot_arena = skate2_core::presentation::PresentationArena {
         id: arena.id,

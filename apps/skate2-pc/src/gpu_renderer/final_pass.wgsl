@@ -43,6 +43,18 @@ fn warped_scene(uv: vec2<f32>) -> vec4<f32> {
     // vignette and noise constants stay separate; HUD draws after this pass.
     return vec4<f32>(colour.rgb * parameters.display_adjustment.x, colour.a);
 }
+// PC Resolution Scale above 100%: four warped samples a quarter of a target pixel from its
+// centre (`step`), a box over the larger scene: at 200% exactly the target pixel's 2x2 texels.
+fn scene_colour(uv: vec2<f32>, step: vec2<f32>) -> vec4<f32> {
+    if parameters.display_adjustment.y > 0.5 {
+        return 0.25 * (warped_scene(uv - step) + warped_scene(uv + vec2<f32>(step.x, -step.y))
+            + warped_scene(uv + vec2<f32>(-step.x, step.y)) + warped_scene(uv + step));
+    }
+    return warped_scene(uv);
+}
+fn quarter_pixel(uv: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(dpdx(uv.x), dpdy(uv.y)) * 0.25;
+}
 fn vignette_colour(uv: vec2<f32>, x: f32) -> vec4<f32> {
     let y = uv.y - 0.5;
     let radius = sqrt(abs(x * x + y * y));
@@ -52,7 +64,7 @@ fn vignette_colour(uv: vec2<f32>, x: f32) -> vec4<f32> {
 }
 @fragment fn fs_standard(input: VertexOutput) -> @location(0) vec4<f32> {
     let x = fma(input.uv.x, 1.7777777910232544, -0.8888888955116272);
-    return warped_scene(input.uv) * vignette_colour(input.uv, x);
+    return scene_colour(input.uv, quarter_pixel(input.uv)) * vignette_colour(input.uv, x);
 }
 @fragment fn fs_noise(input: VertexOutput) -> @location(0) vec4<f32> {
     let first_uv = input.uv * vec2<f32>(10.0, 5.625) + parameters.scroll.xy;
@@ -64,7 +76,7 @@ fn vignette_colour(uv: vec2<f32>, x: f32) -> vec4<f32> {
     let b = dot(second.yxwz, parameters.dot2.yxwz);
     let b_again = dot(second.yxzw, parameters.dot2.yxzw);
     let snow = clamp(((b + a) - 2.0) + b_again + a, 0.0, 1.0);
-    let base = warped_scene(input.uv) * parameters.fade.x;
+    let base = scene_colour(input.uv, quarter_pixel(input.uv)) * parameters.fade.x;
     // Noise slots4/11 use separate MUL/ADD; standard slot3 uses MAD.
     let x = input.uv.x * 1.7777777910232544 - 0.8888888955116272;
     return fma(base, vignette_colour(input.uv, x), vec4<f32>(snow * parameters.fade.y));

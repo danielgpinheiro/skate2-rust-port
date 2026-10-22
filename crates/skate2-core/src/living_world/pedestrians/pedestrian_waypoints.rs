@@ -14,6 +14,8 @@ pub(crate) mod plugin;
 pub(crate) mod spawn;
 #[path = "pedestrian_actor_tracker.rs"]
 pub(crate) mod actor_tracker;
+#[path = "pedestrian_spectators.rs"]
+pub(crate) mod spectators;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct WaypointRef { pub(crate) prop: u32, pub(crate) index: u32 }
@@ -334,6 +336,23 @@ impl PropMan {
                 .notify_waypoint_deregister(guid,self)?;
         }
         Ok(())
+    }
+    /// AudioSystem.CacheCrowdPodInfos824fd6c0 over GetPropsWithinRange82e698a8 (at most thirty
+    /// props within 1000 in x and z): each waypoint_spectator group (LWBasicEntity.GetType) with
+    /// at least two locked waypoints, as its centroid and that count.
+    pub(crate) fn crowd_pod_infos(&self,position:[f32;2])->Result<Vec<([f32;4],i32)>,String>{
+        let found=self.entities.find_near(position,1000.,30,&mut crate::reckoning_numeric::HostReckoningNumeric)
+            .map_err(|e|format!("crowd pod props: {e:?}"))?;
+        let spectator=skate2_formats::attrib::string_hash64("waypoint_spectator");
+        let mut pods=Vec::new();
+        for (id,_) in found{
+            let Some(prop)=self.entities.get(id) else{continue;};
+            let Some(group)=prop.waypoint.as_ref() else{continue;};
+            if prop.core.as_ref().map(|core|core.entity_key)!=Some(spectator){continue;}
+            let locked=group.points.iter().filter(|point|point.locking_entity.is_some()).count();
+            if locked>=2{pods.push((group.centroid,locked as i32));}
+        }
+        Ok(pods)
     }
     pub(crate) fn group_mut(&mut self,id:u32)->Result<&mut WaypointGroup,String>{
         self.entities.get_mut(id).ok_or("waypoint Prop absent")?.waypoint.as_mut().ok_or("Prop is not a waypoint group".into())

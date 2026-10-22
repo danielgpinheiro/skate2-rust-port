@@ -2,9 +2,9 @@
 //! foot catches and scrapes, hand grabs, kick-ups, air dismounts, board and body collisions.
 //!
 //! The speech calls (`CheckForImpactSpeech`, `PlayGrunt`, the speech of `CheckForCollisionSpeech`)
-//! and the crowd reactions of `CheckForScore` belong to systems that are not ported; the speech
-//! state the object keeps is. The foot drag is a Csis class an AEMS module plays, so its instance
-//! data is kept up to date without a sound until AEMS exists.
+//! belong to a system that is not ported; the speech state the object keeps is. `CheckForScore`
+//! makes a challenge's crowds cheer and gasp. The foot drag is a Csis class an AEMS module
+//! plays, so its instance data is kept up to date.
 
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
@@ -13,7 +13,7 @@ use super::{CollisionInfo, SfxCtx, AZIMUTH_SCALE, PITCH_SCALE, VOLUME_SCALE};
 use crate::collision::{self, LEVEL_L1, LEVEL_L3, LEVEL_L4, LEVEL_NUM};
 use crate::nicotine::shape::fctiwz;
 use crate::nicotine::{DMixIoId, PresetType};
-use crate::presentation::{audio_material, MATERIAL_MAX};
+use crate::presentation::{audio_material, SkaterData, MATERIAL_MAX};
 use crate::rwac::{PluginRef, VoiceId};
 use crate::splicer::{SpliceId, SpliceUpdateParams};
 use crate::surface::{ollie_and_land_material, power_slide_material, stopping_material};
@@ -227,6 +227,10 @@ pub struct Contacts {
     in_bail_last_update: bool,
     first_grunt: bool,
     land_tick: i32,
+    /// `mbWasBail` (+0x1B0) and `mBailCount` (+0x1B4): the visual bail last update, and the
+    /// updates until a bail without a wiped-out score gasps.
+    was_bail: bool,
+    bail_count: i32,
     /// `mCurrentPriority` (`tHOMPriority`): priority and `timeBeforeLesserOrEqual`.
     current_priority: (i32, i32),
     bail_level_count: [i32; 3],
@@ -312,6 +316,8 @@ impl Contacts {
             in_bail_last_update: false,
             first_grunt: true,
             land_tick: 0,
+            was_bail: false,
+            bail_count: 0,
             current_priority: (0, 0),
             bail_level_count: [0; 3],
             kickup: None,
@@ -414,8 +420,9 @@ impl Contacts {
         ctx.release(&mut self.kickup);
     }
 
-    /// `SFXObj_Contacts::UpdateParams` 0x8254f8a0 (the state is attached).
-    pub fn update_params(&mut self, t: f32, physics: &PlayerPhysics, io: Option<DMixIoId>, ctx: &mut SfxCtx<'_>) {
+    /// `SFXObj_Contacts::UpdateParams` 0x8254f8a0 (the state is attached), for the skater at
+    /// `array_index` of the presentation.
+    pub fn update_params(&mut self, t: f32, physics: &PlayerPhysics, skater: &SkaterData, array_index: i32, io: Option<DMixIoId>, ctx: &mut SfxCtx<'_>) {
         self.check_for_foot_catches(physics, ctx);
         self.check_for_foot_scrapes(physics, ctx);
         let manual = self.check_for_manual(physics, io, ctx);
@@ -427,6 +434,7 @@ impl Contacts {
         self.check_for_board_collisions(physics, ctx);
         self.check_for_collision_speech(physics, ctx);
         self.check_for_hand_grabs(physics, ctx);
+        self.check_for_score(skater, array_index, ctx);
         self.check_for_kick_up(physics, ctx);
         self.check_for_air_dismount(physics, ctx);
         let time = self.current_priority.1;
@@ -436,6 +444,39 @@ impl Contacts {
             self.current_priority.1 = 0;
         }
         self.update_bail_average(io, ctx);
+    }
+
+    /// `CheckForScore` 0x82520780: a skater's banked score (the local skater's rise in announcer
+    /// score instead) cheers; the local skater's wiped-out trick score gasps, as does a visual
+    /// bail with none, four updates after it began. Either goes to `AudioSystem::PlayCrowdSound`.
+    fn check_for_score(&mut self, skater: &SkaterData, array_index: i32, ctx: &mut SfxCtx<'_>) {
+        let local = skater.local;
+        let mut score = skater.score as i32;
+        let mut wiped_out = 0;
+        if local {
+            score = ctx.cond_score_delta.max(0);
+            wiped_out = skater.wipedout_trick_score as i32;
+            if ctx.bail {
+                if !self.was_bail {
+                    self.bail_count = 4;
+                }
+            } else {
+                self.bail_count = 0;
+            }
+            self.was_bail = ctx.bail;
+            if wiped_out > 0 {
+                self.bail_count = 0;
+            }
+            if self.bail_count > 0 {
+                self.bail_count -= 1;
+                if self.bail_count == 0 {
+                    wiped_out = 1;
+                }
+            }
+        }
+        if score != 0 || wiped_out > 0 {
+            ctx.play_crowd_sound(array_index, score, wiped_out, local);
+        }
     }
 
     /// `SFXObj_Contacts::ProcessUpdate` 0x8254c1c8 (the state is attached).

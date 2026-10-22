@@ -94,8 +94,6 @@ impl GpuRenderer {
     }
     fn resize_render_targets(&mut self,width:u32,height:u32) {
         self.config.width=width;self.config.height=height;
-        (self.depth,self.depth_sample,self.stencil_sample)=depth_view(&self.device,&self.config,self.sample_count);
-        self.msaa_color=msaa_view(&self.device,&self.config,self.sample_count);
-        if let Some(pass)=&mut self.final_pass {pass.resize(&self.device,width,height,&self.depth_sample,&self.stencil_sample,&self.main_target);}
+        self.rebuild_scene_targets();
     }
 }

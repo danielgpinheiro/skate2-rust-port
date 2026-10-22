@@ -624,6 +624,10 @@ pub use selected_living_world_dmo::SelectedDynamicObjectVisual;
 mod selected_living_world_vehicle_visual;
 pub use selected_living_world_vehicle_visual::SelectedVehicleVisual;
 pub use selected_living_world_recipes::pedestrian_animation::presentation::{PedestrianPlacement, SelectedPedestrianVisual};
+pub use selected_living_world_recipes::crowd::{
+    CrowdTargetCamera, IMPOSTER_ATLAS, IMPOSTER_CELL, SelectedCrowdImposter, SelectedCrowdTarget, SelectedCrowdVisual,
+    imposter_transform,
+};
 #[path = "living_world/assets/living_world_presentation_opacity.rs"]
 mod living_world_presentation_opacity;
 pub use living_world_presentation_opacity::{LivingWorldOpacityDistance, LivingWorldOpacityParameters, LivingWorldOpacitySettings, LivingWorldOpacityState};

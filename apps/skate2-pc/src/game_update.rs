@@ -1,9 +1,12 @@
 //! The game's updates (PC port addition, `skate2-update`, `docs/release/auto-update.md`): a
 //! release build looks for a newer release at startup, the main menu offers it
 //! (`skate2_core::ui::update_prompt`), and once it is in place the window closes and the new
-//! version starts. `skate2-pc --update` updates from a command line, and `--server` says when a
-//! newer release is out, as the dedicated server does.
+//! version starts. A player's first launch of a release lists its changes once (`changelog.txt`
+//! at the repository's root, built in), as `config.json` names another release as seen.
+//! `skate2-pc --update` updates from a command line, and `--server` says when a newer release
+//! is out, as the dedicated server does.
 
+use skate2_core::ui::game_config::GameConfig;
 use skate2_core::ui::update_prompt::{UpdateRequest, UpdateStatus};
 use skate2_update::{Status, Updater};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +17,40 @@ const EXECUTABLE: &str = if cfg!(windows) { "skate2-pc.exe" } else { "skate2-pc"
 
 /// The new version is in place: `play` starts it once the window has closed.
 static RESTART: AtomicBool = AtomicBool::new(false);
+
+/// This release's changes, a change a line (`skate2_core::ui::update_prompt::Changelog::parse`).
+const CHANGELOG: &str = include_str!("../../../changelog.txt");
+
+/// Lists this release's changes at any launch, to see them again.
+const CHANGELOG_FLAG: &str = "--changelog";
+
+/// A player's launch: no arguments, or only `--changelog`.
+pub(crate) fn player_launch() -> bool {
+    std::env::args_os().skip(1).all(|argument| argument == CHANGELOG_FLAG)
+}
+
+/// This release's changes when this launch shows them: with `--changelog`, or at a player's
+/// first launch of the release, which `config.json` then records as seen (`changelog_seen`).
+/// A changelog without entries shows nothing.
+pub(crate) fn changelog() -> Option<skate2_core::ui::update_prompt::Changelog> {
+    let version = env!("CARGO_PKG_VERSION");
+    let asked = std::env::args_os().skip(1).any(|argument| argument == CHANGELOG_FLAG);
+    let first = player_launch() && changelog_unseen(version);
+    (asked || first)
+        .then(|| skate2_core::ui::update_prompt::Changelog::parse(version, CHANGELOG))
+        .filter(|changelog| !changelog.entries.is_empty())
+}
+
+/// Records `version`'s changes as seen in `config.json`: whether they were not yet. Where the
+/// file cannot take the record, none show, as they would at every launch.
+fn changelog_unseen(version: &str) -> bool {
+    let mut config = GameConfig::load();
+    if config.changelog_seen == version {
+        return false;
+    }
+    config.changelog_seen = version.to_owned();
+    config.save().is_ok()
+}
 
 /// This build's update settings: none for a development build, or for one built without
 /// `SKATE2_UPDATE_REPOSITORY`.

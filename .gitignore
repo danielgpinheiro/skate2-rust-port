@@ -30,8 +30,15 @@ release-secret.txt
 local.toml
 *.log
 
-# The dedicated server's private word list, wherever it is kept.
+# The dedicated server's private files, wherever they are kept: its word list, settings,
+# moderation panel key and ban lists.
 badwords.txt
+server-config.json
+moderation-key.txt
+chat-shadowbans.json
+chat-shadowbans.json.new
+ip-bans.json
+ip-bans.json.new
 
 # Local working notes, saves and game files: never published.
 /private-notes/

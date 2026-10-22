@@ -63,6 +63,9 @@ pub(super) struct Pipelines {
     cas: wgpu::RenderPipeline,
     cas_ghost: [wgpu::RenderPipeline; 2],
     cas_hair: [wgpu::RenderPipeline; 3],
+    /// livingworld_stamp's `crowd` technique (programs 0 and 4), which
+    /// `CrowdImposterTarget::RenderPresEntity` 0x827e9298 selects for the imposter atlas.
+    crowd: wgpu::RenderPipeline,
 }
 pub(super) const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     0=>Float32x3,1=>Float32x2,2=>Uint8x4,3=>Uint8x4,4=>Float32x3,5=>Float32x3];
@@ -202,6 +205,13 @@ impl Pipelines {
             )
         };
         Self {
+            crowd: pipeline(CharacterPass {
+                label: "livingworld_stamp crowd",
+                vertex: "vs_stamp",
+                fragment: "fs_stamp_crowd",
+                cull: CullMode::None,
+                ..DEFAULT_PASS
+            }),
             default: pipeline(CharacterPass {
                 label: "livingworld_stamp default",
                 vertex: "vs_stamp",
@@ -301,6 +311,9 @@ impl Pipelines {
             shadow_sampler,
             world_sampler,
         }
+    }
+    pub(super) fn crowd_technique(&self) -> &[wgpu::RenderPipeline] {
+        std::slice::from_ref(&self.crowd)
     }
     pub(super) fn technique(&self, ghosted: bool) -> &[wgpu::RenderPipeline] {
         if ghosted {
@@ -533,9 +546,12 @@ struct WorldShadow {rows:array<vec4<f32>,3>}
 @group(3) @binding(5) var shadow_sampler:sampler;
 @group(3) @binding(6) var<uniform> world_shadow:WorldShadow;
 @group(3) @binding(7) var world_sampler:sampler;
-struct Output { @builtin(position) @invariant position:vec4<f32>,@location(0) uv:vec4<f32>,
-    @location(1) tangent:vec3<f32>,@location(2) binormal:vec3<f32>,@location(3) normal:vec3<f32>,
-    @location(4) relative:vec3<f32>,@location(5) fog:vec4<f32> }
+// Centroid: with MSAA an edge pixel whose centre lies off the triangle keeps its attributes
+// inside it, so silhouettes never sample beyond the surface (texture, normal, shadow lookup).
+struct Output { @builtin(position) @invariant position:vec4<f32>,@location(0) @interpolate(perspective, centroid) uv:vec4<f32>,
+    @location(1) @interpolate(perspective, centroid) tangent:vec3<f32>,@location(2) @interpolate(perspective, centroid) binormal:vec3<f32>,
+    @location(3) @interpolate(perspective, centroid) normal:vec3<f32>,@location(4) @interpolate(perspective, centroid) relative:vec3<f32>,
+    @location(5) @interpolate(perspective, centroid) fog:vec4<f32> }
 @vertex fn vs_stamp(@location(0) position:vec3<f32>,@location(1) uv:vec2<f32>,
     @location(2) stored_weights:vec4<u32>,@location(3) stored_indices:vec4<u32>,
     @location(4) tangent:vec3<f32>,@location(5) binormal:vec3<f32>)->Output {
@@ -586,7 +602,7 @@ fn world_shadow_value(world:vec4<f32>)->f32{
 // Final defaultlivingworld_defaultPS pc18..23, unlike its older UPDB text,
 // multiplies gain by m_params[5].w and saturate(worldShadow+m_params[7].w).
 struct PlainOutput { @builtin(position) @invariant position:vec4<f32>,
-    @location(0) uv:vec2<f32>,@location(1) relative:vec3<f32>,@location(2) fog:vec4<f32> }
+    @location(0) @interpolate(perspective, centroid) uv:vec2<f32>,@location(1) @interpolate(perspective, centroid) relative:vec3<f32>,@location(2) @interpolate(perspective, centroid) fog:vec4<f32> }
 @vertex fn vs_plain(@location(0) position:vec3<f32>,@location(1) uv:vec2<f32>,
     @location(2) weights:vec4<u32>,@location(3) indices:vec4<u32>)->PlainOutput {
     let world=skin_world(position,weights,indices);
@@ -648,4 +664,37 @@ fn stamp_colour(input:Output)->vec4<f32>{
     let colour=stamp_colour(input);
     if object.color.a<.0039215689 {discard;}return colour;
 }
+// Final livingworld_stamp_crowdPS: the default lighting with only the CSM self-shadow, no
+// colorize, LOD blend, gain, fog or tone; alpha marks a texel's colorize green as 0, else 1.
+fn stamp_crowd_colour(input:Output)->vec4<f32>{
+    let sample=textureSample(diffuse,normal_sampler,input.uv.xy);
+    let colour=sample.xyz*sample.xyz;
+    let normal=textureSample(normal_map,normal_sampler,input.uv.xy).xyz*2.-vec3<f32>(1.);
+    let n=normalize(normal.x*input.tangent+normal.y*input.binormal+normal.z*input.normal);
+    let view=normalize(-input.relative);let light=stamp.light.xyz;
+    let rim=normalize(light*vec3<f32>(-1.,.2,-1.)-view);
+    let shadow=csm_shadow(vec4<f32>(input.relative+stamp.camera_lod.xyz,1.));
+    let facing=1.-clamp(dot(n,view),0.,1.);
+    let key_fresnel=pow(facing,stamp.material[1].w);let rim_fresnel=pow(facing,stamp.material[0].z);
+    let key_diffuse=clamp(dot(n,light),0.,1.)*stamp.material[1].xyz*shadow;
+    let rim_diffuse=clamp(dot(n,rim)*rim_fresnel,0.,1.)*stamp.material[6].xyz;
+    let ambient=irradiance(n)*stamp.material[5].w;
+    let key_spec=pow(clamp(dot(view,reflect(-light,n)),0.,1.),stamp.material[2].w)*shadow;
+    let rim_spec=pow(clamp(dot(view,reflect(-rim,n)),0.,1.),stamp.material[3].w);
+    let spec=clamp((key_spec*stamp.material[2].xyz*key_fresnel+rim_spec*stamp.material[3].xyz*rim_fresnel)*normal.y,vec3<f32>(0.),vec3<f32>(1.));
+    return vec4<f32>(colour*(key_diffuse+ambient+rim_diffuse)+spec,trunc(colour.y+.998775));
+}
+@fragment fn fs_stamp_crowd(input:Output)->@location(0) vec4<f32>{return stamp_crowd_colour(input);}
 ";
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_programs_validate() {
+        let source = format!("{}{}{}{}", super::SKINNING, super::SHADER, super::surface::SHADER, super::cas::SHADER);
+        let module = wgpu::naga::front::wgsl::parse_str(&source).expect("livingworld_stamp WGSL");
+        wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
+            .validate(&module)
+            .expect("livingworld_stamp WGSL validation");
+    }
+}

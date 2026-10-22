@@ -39,6 +39,8 @@ pub(super) struct ReplayEditorSession {
     location: String,
     last_stream_focus:[f32;3],
     collision:collision::Collision,
+    /// Pushed by the Hall of Meat results, which the exit pops back to.
+    hom_results:bool,
 }
 
 /// Temporary presentation ownership during a PC media export. Simulation and
@@ -90,7 +92,7 @@ impl<T,C> SelectedLiveSession<T,C> {
             Ok(archive)=>archive,
             Err(message)=>{self.skate_reel_failed(&message);self.frontend_fade.reveal();return Ok(());}
         };
-        self.open_replay_recording(Some(archive))?;
+        self.open_replay_recording(Some(archive),false)?;
         if self.replay_editor.is_some() {
             if let Some(r)=self.main_menu.as_mut().and_then(|m|m.skate_reel.as_mut()) {r.replay_opened();}
         }
@@ -98,9 +100,13 @@ impl<T,C> SelectedLiveSession<T,C> {
     }
     /// StartHub ProcessSelection8265ea98 pushes state12 after FadeComplete.
     pub(super) fn open_replay_editor(&mut self)->Result<(),SelectedLiveError> {
-        self.open_replay_recording(None)
+        self.open_replay_recording(None,false)
     }
-    fn open_replay_recording(&mut self,mut recording:Option<archive::Archive>)->Result<(),SelectedLiveError> {
+    /// FrontEndState_HOMResults::OnMenuSelect826591e8 pushes state12 at once, unfaded.
+    pub(super) fn open_hom_results_replay_editor(&mut self)->Result<(),SelectedLiveError> {
+        self.open_replay_recording(None,true)
+    }
+    fn open_replay_recording(&mut self,mut recording:Option<archive::Archive>,hom_results:bool)->Result<(),SelectedLiveError> {
         if self.replay_editor.is_some() {return Ok(());}
         let index=recording.as_ref().map(|a|&a.index).unwrap_or_else(||self.replay_index());
         let (start,end)=(index.oldest_frame_number_written(),index.last_frame_number_written());
@@ -140,8 +146,8 @@ impl<T,C> SelectedLiveSession<T,C> {
         self.replay_restorer=PresentationRestorer::new();
         self.replay_editor=Some(ReplayEditorSession {export:None,loaded_index,loaded_frames,loaded_hulls,intro_done:false,animation_ready:false,controller,camera:NisCamera::default(),rate:0.,
             game_camera:CameraRestore::new(),shakes,mover:Mover::default(),spaces:Spaces::default(),
-            last_rate_frame:0.,exit:0,save:None,location:String::new(),last_stream_focus:[0.;3],collision:Default::default()});
-        if self.main_menu.is_none() {self.pause_menu.hide_for_replay();}
+            last_rate_frame:0.,exit:0,save:None,location:String::new(),last_stream_focus:[0.;3],collision:Default::default(),hom_results});
+        if self.main_menu.is_none()&&!hom_results {self.pause_menu.hide_for_replay();}
         self.restore_editor_frame(0.)?;
         let location=self.initial_replay_location().map_err(error)?;
         self.replay_editor.as_mut().expect("opened editor").location=location;
@@ -308,11 +314,12 @@ impl<T,C> SelectedLiveSession<T,C> {
         if (editor.exit==3 && exit_loaded&&editor.loaded_hulls.is_none())||(editor.exit==4&&hulls_loaded) {
             self.inner.bound_input.as_ref().ok_or_else(||error("input absent"))?
                 .try_set_replay_pause(false).map_err(error)?;
-            self.replay_editor=None;
+            let hom_results=self.replay_editor.take().is_some_and(|e|e.hom_results);
             self.replay_clock=None;
             self.replay_restorer=PresentationRestorer::new();
             super::replay_session::restore_game_cloth(&mut self.inner, self.career.as_ref())?;
             if let Some(reel)=self.main_menu.as_mut().and_then(|m|m.skate_reel.as_mut()) {reel.replay_closed();}
+            else if hom_results {if let Some(career)=self.career.as_mut() {career.reenter_hom_results();}}
             else {self.pause_menu.return_from_replay();}
             self.frontend_reveal_pending=true;
         } else if editor.exit==2 && exit_loaded {editor.exit=3;}
@@ -490,7 +497,7 @@ impl<T,C> SelectedLiveSession<T,C> {
                     && let Some(materials)=restored.materials {
                     visual.party_skaters.push(SelectedSkaterVisual {name_tag:None,palette:restored.palette,materials:materials.clone(),
                         hips_position:restored.hips_position,world_bounds:restored.bounds,opacity:restored.opacity,
-                        ghosted:restored.ghosted,entity_type:0x122,players_recipe:frame.players_recipe[i]});
+                        ghosted:restored.ghosted,entity_type:0x122,lobby_ghost:false,players_recipe:frame.players_recipe[i]});
                 }
             }
         }

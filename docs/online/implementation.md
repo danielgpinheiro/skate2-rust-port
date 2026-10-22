@@ -102,6 +102,36 @@ game's state:
   dropped, spaces too; each run of one letter cut to one. A text holding an entry anywhere is
   caught; an entry that reads as fewer than two letters is ignored. Without the file nothing is
   filtered.
+- **Bans** (PC port addition, `crates/skate2-net/src/moderation.rs`): two lists of IP addresses,
+  each a JSON object of `"address": "name"` pairs (the nickname the address was banned under).
+  `chat-shadowbans.json`: a member's chat line from one of its addresses comes back to that member
+  as any line does and reaches no one else. `ip-bans.json`: the server reads no datagram from one
+  of its addresses and answers none; a ban closes the address's connections without a word to
+  them, and their games' other members see them lose their connection. The server looks at both
+  files every second and reads one again when it changed, so a hand edit applies without a
+  restart; a file that no longer reads as such a list leaves the bans in force, and a deleted one
+  lifts its bans. A ban holds an address, not a nickname, so it covers every player behind that
+  address (a household's router, a mobile network's shared address).
+- **Moderation panel** (PC port addition, `crates/skate2-net/src/panel.rs`): with
+  `"moderation_panel_port": <port>` in `server-config.json` and a key in `moderation-key.txt`
+  (16 to 256 letters, digits, `-`, `_`, `.` or `~`, on one line), the server serves
+  `http://<server>:<port>/moderationpanel?key=<key>` at its own address. The page lists the
+  signed-in players (name, IP address, game, time online, version, chat shadowban), each with a
+  box to tick, with Chat Shadowban and IP Ban beside them, and under them the bans in force, with
+  Lift Ban; an action adds to or removes from the lists above and shows its outcome once.
+  Without the key, every request is answered as one for a page that does not exist; an address
+  that sends 10 wrong keys within 15 minutes is answered so for the rest of those 15 minutes,
+  whatever key it sends. The key is compared by its SHA-256 hash, in time that does not depend on
+  where two keys differ, and is never logged. The page runs no script, loads nothing else, and
+  is never cached or framed or followed by a referrer. Requests are served on threads of their
+  own (8 at once, each with 10 seconds to arrive, 8 KiB of headers and a 16 KiB form at most),
+  which ask the server's loop for what they show and do. The panel speaks plain HTTP, so the key
+  crosses the network unencrypted. Without the setting or a valid key the panel is off, and the
+  server's console says why.
+- **The server's files**: `server-config.json`, `moderation-key.txt` and the two ban lists sit
+  together in the folder of `server-config.json` (beside the server's executable or, when only it
+  holds one, the working directory). Like `badwords.txt`, git ignores them, no release zip
+  carries them and an update never replaces them.
 - **Members**: the first member is the game host peer (the one with the host menus); when the
   host leaves the next member takes over. A member silent for 10 seconds is dropped; one that
   sends neither a replay frame nor `Busy` for 2 seconds (a frozen or paused game) is kicked for
@@ -112,6 +142,16 @@ game's state:
   sync points → `Complete` → `AllPlayersComplete` → `Results` → `FinalResults` and
   `GameTimer(DisplayResults)` (the board shows four seconds) → `ExitPostChallenge` → the host's next challenge
   (`ResetAttributes`) → lobby skate. Barriers time out so a dropped player cannot hang the rest.
+  A challenge every participant left goes straight back to lobby skate, with no board.
+- **Leave Challenge** (PC port addition): `LeaveChallenge` takes a participant out of the
+  challenge as a leave of the game would (its barriers, completion and result no longer wait
+  for it, and the board leaves it out), but it stays a member: `ChallengeLeave` tells every
+  member, and it waits in lobby skate apart from the challenge until the lobby reset. One from a
+  member not playing the challenge is ignored, as are its later barriers and facts.
+- **Kicks** (PC port addition): a kick closes the game to the kicked player's IP address for as
+  long as the game lasts. The lobby browser no longer lists it to that address, matchmaking
+  passes over it, and joining it by its id gets `NO_MATCH`, whatever nickname the address comes
+  back under.
 - **Host requests**: `GameRequest(StartGame)` (two or more players in the world, not in an
   online free skate, not during a location change), privacy, kick; `RequestChange` broadcasts
   `GameChange` and moves the game two seconds later. A player who joins in those two seconds
@@ -123,10 +163,13 @@ game's state:
   after its sender left the game is ignored.
 - **Relays**: each player's replay frames (re-encoded for each receiver against the frames that
   receiver acknowledged), challenge facts, recipes (appearance). From a challenge's load until
-  the game is back in lobby skate its participants and the members in lobby skate are apart:
-  frames go only within each group (facts only to participants), so neither sees the other, as
-  in the original. Frames start again at the lobby reset, coded afresh (the receiver holds none
-  of the sender's recent ones). An acknowledgement counts only for a frame the server still
+  the game is back in lobby skate its participants see nothing of the members in lobby skate
+  (who joined during it, were not in the world at its start, did not load it, or left it), as
+  in the original: their frames reach no participant, and facts go only to participants. The
+  members in lobby skate do get the participants' frames and watch them as ghosts (PC port
+  addition; `GameJoined` names the participants to one who joins during the challenge). A
+  participant's frames reach those members from the lobby reset on, coded afresh (the receiver
+  holds none of the sender's recent ones). An acknowledgement counts only for a frame the server still
   holds of the slot's member: one a receiver sent for the slot's member before (a player who
   left, acknowledged before the receiver heard so) would otherwise stand, its ticks far past the
   new member's, and every run to that receiver would go coded whole.
@@ -390,7 +433,11 @@ letters, "Repeated trick" and the final ranking are therefore consequences of th
 run, not packets: nothing else needs acknowledging. What the script does to a skater (teleports,
 pins) only that skater's console carries out. A player who leaves is reported to the script as
 `cMsgPlayerDisconnected` at the tick the server's leave arrives, and the script ends the round
-the original way. A Spot Battle's high score works the same way: every console's script scores
+the original way, with one correction: S.K.A.T.E.'s `prepare_follower` skips disconnected
+followers and, past the end of `FollowerOrder`, started again at the first one, so a last
+follower who left before their turn sent the others back to the same set trick without end; the
+search now stops at the last follower and the round goes on to `process_round`
+(`challenge/script_fixes.rs`). A Spot Battle's high score works the same way: every console's script scores
 each player's lines from that player's facts and keeps the spot's top score, so the "score to
 beat" each player sees comes out of the shared run rather than a packet of its own.
 
@@ -500,7 +547,12 @@ to the lobby:
   full eight-player game), each player's menu with Kick Player and its confirmation, Host Options
   (Match Setup and Change Location over the hub in their host states, Session Access);
   Start Challenge only in a challenge lobby with another player, outside a challenge and a
-  change. The hub hides the HUD; the game keeps running under it (`Net::ResumeGame`).
+  change. The original closes Host Options while a game is on and offers Kick Player only with
+  no challenge on; the port keeps both open to the host while a challenge runs (PC port
+  addition), so a kick or a change of access applies at once, while Match Setup and Change
+  Location stay greyed until the game is back in lobby skate. A host waiting in the pre-game
+  lobby is offered no Start Challenge while the game's challenge runs. The hub hides the HUD; the game
+  keeps running under it (`Net::ResumeGame`).
 - **Challenges**: every unranked custom match type: Spot Battle, Best Trick, Jam, S.K.A.T.E.,
   Death Race and Hall of Meat. Loading barrier, the challenge HUD, turns, letters, rounds and
   timers as in the original; contest round boards between rounds; at the end FE state 8's
@@ -535,12 +587,23 @@ to the lobby:
 - **HUD pieces**: the online timer (lock/start/hurry countdowns, the location-change countdown)
   and the "waiting for skaters" chyron.
 - **Joining a game mid-challenge**: the joiner skates in the lobby until the next challenge,
-  apart from the challenge's players (see Relays above). A remote skater whose frames stop for
-  three seconds shows no more (its name and sounds go with it) until its frames come again; a
-  shorter hitch leaves it where it was. The original takes no join while a challenge runs, so
-  the challenge's players hear nothing of a member waiting in the pre-game lobby: no line when
-  one leaves. As a port addition, their event log reads "<name> has joined pre-game lobby." when
-  one joins during their round.
+  apart from the challenge's players (see Relays above), whom it watches as ghosts (PC port
+  addition): drawn with the ghost technique at no more than 40% opacity, with their names and
+  sounds and no deck shadow, while they never see it (a frame of a member not in their round
+  that still arrives is dropped). A remote skater whose frames stop for three seconds shows no
+  more (its name and sounds go with it) until its frames come again; a shorter hitch leaves it
+  where it was. The original takes no join while a challenge runs, so the challenge's players
+  hear nothing of a member waiting in the pre-game lobby: no line when one leaves. As a port
+  addition, their event log reads "<name> has joined pre-game lobby." when one joins during
+  their round.
+- **Leave Challenge** (PC port addition): the online challenge's pause menu has Leave Challenge
+  above Quit Game while the local player's round runs and it has not finished, with a No/Yes
+  confirmation. Yes ends the local round as the lobby reset does (the skater travels back to the
+  game's location behind the fade) and leaves the player in the pre-game lobby, watching the
+  others as ghosts. To the round's other players the leaver disconnects from the challenge
+  after its last facts, as a player who left the game does, its skater goes at once, and the log
+  reads "<name> has left the challenge."; the members already waiting see the leaver as itself
+  again and read the same line.
 - **Sync points**: the original's flow preloaded the round's NIS and waited for the streamer at
   the spawn point before reporting the sync point; here the sync point goes out at once and the
   teleport after the release streams the spawn (the flow teleport's `MoveStreamFocus`).

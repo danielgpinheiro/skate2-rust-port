@@ -899,7 +899,7 @@ mod tests {
             postfx: std::sync::Arc::new(crate::render_postfx::Assets {
                 cubes: BTreeMap::new(), blooms: BTreeMap::new(), exposures: BTreeMap::new(),
                 location: [0;3], matrix: [[0.;4];3],
-                bloom_sample_offset: 0., hom: Default::default(), watermark_position: [0.;2],
+                bloom_sample_offset: 0., hom: Default::default(), watermark_position: [0.;2], deck_ao: [0.; 4],
             }),
             use_world_sh_probes: true,
             default_irradiance:[[0.;4];9],

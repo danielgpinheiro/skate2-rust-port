@@ -241,6 +241,7 @@ pub fn run_with_options(
             let result = client.window_event(&event).and_then(|()| {
                 match event {
                     WindowEvent::CloseRequested => target.exit(),
+                    WindowEvent::Focused(focused) => renderer.set_focused(focused),
                     WindowEvent::ModifiersChanged(modifiers) => alt = modifiers.state().alt_key(),
                     WindowEvent::KeyboardInput { event, .. }
                         if alt && !text_entry && !event.repeat && event.state == winit::event::ElementState::Pressed
@@ -487,10 +488,13 @@ pub fn run_with_options(
             let minimized = window.inner_size().width == 0 || window.inner_size().height == 0;
             // The Fullscreen display setting: a borderless window over its monitor, switched
             // between frames. The swapchain takes the new size before the next frame presents;
-            // the Resized events of the switch wait in winit's queue until the next input.
+            // the Resized events of the switch wait in winit's queue until the next input. The
+            // game takes no mouse input, so fullscreen hides the cursor over the window (winit
+            // shows it again outside it).
             let fullscreen = renderer.fullscreen();
             if !minimized && fullscreen != window.fullscreen().is_some() {
                 window.set_fullscreen(fullscreen.then_some(winit::window::Fullscreen::Borderless(None)));
+                window.set_cursor_visible(!fullscreen);
                 let size = window.inner_size();
                 renderer.resize(size.width, size.height);
                 window.request_redraw();

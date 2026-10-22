@@ -110,6 +110,20 @@ impl Vault {
             .is_some_and(|byte| byte != 0)
     }
 
+    /// `Attrib::Instance::Lookup` of element `index`: its bytes, `None` when the collection or the
+    /// attribute is missing.
+    #[must_use]
+    pub fn find(&self, collection: Collection, key: u64, index: u32) -> Option<Vec<u8>> {
+        self.source.as_ref()?.attribute(collection.class, collection.key, key, index)
+    }
+
+    /// A found attribute's element 0 as `f32` (0.0 when shorter than a word).
+    #[must_use]
+    pub fn find_f32(&self, collection: Collection, key: u64) -> Option<f32> {
+        let bytes = self.find(collection, key, 0)?;
+        Some(bytes.get(..4).map_or(0.0, |word| f32::from_be_bytes([word[0], word[1], word[2], word[3]])))
+    }
+
     /// Element `index` of a structure array (zeros from `DefaultDataArea`).
     #[must_use]
     pub fn bytes(&self, collection: Collection, key: u64, index: u32, size: usize) -> Vec<u8> {

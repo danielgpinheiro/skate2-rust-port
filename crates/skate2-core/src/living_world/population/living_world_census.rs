@@ -54,6 +54,13 @@ impl CensusState {
             vehicles_banned: false,
         }
     }
+    /// `ReserveForceSpawnSlots` 0x826f4528: the larger reservation, kept four updates.
+    pub(crate) fn reserve_force_spawn_slots(&mut self, count: i32) {
+        if count > self.pedestrian_reserve {
+            self.pedestrian_reserve = count;
+        }
+        self.reserve_frames = 4;
+    }
     /// Update prefix; the actual component cull queues are processed after this.
     /// ProfileFreeSkate uses the two supplied backend sliders, other modes1.
     pub(crate) fn update_settings(

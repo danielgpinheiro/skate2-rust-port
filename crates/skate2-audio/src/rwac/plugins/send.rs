@@ -60,6 +60,19 @@ impl Send {
             self.target = Some((slot, channels));
         }
     }
+
+    /// `mSubMixConnector.mpSubMix` set.
+    #[must_use]
+    pub fn is_connected(&self) -> bool {
+        self.target.is_some()
+    }
+
+    /// Unlinked by a released SubMix (`SubMix::ReleaseEvent` 0x82bfc2d8): unconnected, no declick.
+    pub fn unlink(&mut self, slots: &[usize]) {
+        if self.target.is_some_and(|(slot, _)| slots.contains(&slot)) {
+            self.target = None;
+        }
+    }
 }
 
 impl PlugIn for Send {

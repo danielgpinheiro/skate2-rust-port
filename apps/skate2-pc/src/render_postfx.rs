@@ -22,6 +22,10 @@ pub(crate) struct Assets {
     pub bloom_sample_offset: f32,
     /// PostFX constructor82839530 / DownsampleForScreenshot82832a0c.
     pub watermark_position: [f32;2],
+    /// `m_deckAOArtribs` (the PostFX constructor 0x828394b0: `rendering` 0x031c083f119190b8) as
+    /// `CalculateDeckShadowMatrix` 0x82846458..0x82846524 reads it: `DeckAO_XLen`, `ZLen`,
+    /// `Radius` and `HeightFallOff`, each 0 (`DefaultDataArea`) when absent.
+    pub deck_ao: [f32; 4],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -252,6 +256,8 @@ impl Assets {
                 string_hash64("postfx"), 0x550740b00aa8d4ac, 0x88a3da4a1d1d4179,
             )?[0],
             watermark_position: vault.floats::<2>(rendering,0x7084fd225e986209,0xdf5765a619fffc5d)?,
+            deck_ao: [0x196a_ed84_ab3e_f932, 0xc80d_f108_8e67_a19b, 0xdad1_d10d_a322_6ba2, 0xc541_5dd3_823b_6b29]
+                .map(|key| vault.floats::<1>(rendering, 0x031c_083f_1191_90b8, key).map_or(0.0, |[value]| value)),
         })
     }
 }

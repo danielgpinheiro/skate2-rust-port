@@ -57,6 +57,10 @@ mod pedestrian_execution;
 mod pedestrian_moodables;
 #[path = "selected_living_world_transfer.rs"]
 mod transfer;
+#[path = "selected_living_world_spectators.rs"]
+mod spectators;
+#[path = "selected_living_world_crowd.rs"]
+pub(crate) mod crowd;
 #[path = "selected_living_world_mood.rs"]
 pub(crate) mod mood;
 
@@ -98,6 +102,10 @@ impl PresentationRecipeModels {
     }
     pub(crate) fn get(&self, id: u64) -> Option<&Arc<AmbientRecipeAssets>> {
         self.entries.get(&id)
+    }
+    /// `GetRegisteredLWRecipeIDs` 0x828094a8: the registered recipes in asset order.
+    pub(crate) fn ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.entries.keys().copied()
     }
     fn add(&mut self, id: u64, registry: &MountedRecipeRegistry) -> Result<(), RecipeBridgeError> {
         // GetRecipe precedes the membership test in the source.
@@ -141,6 +149,8 @@ pub(crate) struct SelectedLivingWorldRecipes {
     pub(crate) challenge_avoid_volumes: crate::pedestrian_navigation::wander::ChallengeAvoidVolumes,
     pub(crate) recipes: RecipeMan,
     pub(crate) presentation: PresentationRecipeModels,
+    /// `Presentation::mCrowdPresentation` and its no-sim pedestrians.
+    pub(crate) crowd: crowd::CrowdPresentation,
     callback: Arc<()>,
     completed: VecDeque<LoadedRecipe>,
     pending: VecDeque<PendingRecipe>,
@@ -160,6 +170,7 @@ impl SelectedLivingWorldRecipes {
             challenge_avoid_volumes: crate::pedestrian_navigation::wander::ChallengeAvoidVolumes::new(),
             recipes: RecipeMan::new(),
             presentation: PresentationRecipeModels::new(),
+            crowd: crowd::CrowdPresentation::default(),
             callback: Arc::new(()),
             completed: VecDeque::new(),
             pending: VecDeque::new(),

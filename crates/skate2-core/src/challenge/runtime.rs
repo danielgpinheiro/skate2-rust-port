@@ -416,7 +416,8 @@ fn attach(lua: &mut Lua<World>, world: &mut World, handler: u64) {
     }
     world.attached.insert(handler);
     let name = handler_name(&db, handler);
-    match lua.load(blob, &name) {
+    let chunk = super::script_fixes::corrected(handler, blob);
+    match lua.load(&chunk, &name) {
         Ok(main) => {
             if let Err(e) = lua.call(world, &main, &[]) {
                 world.output(Output::ScriptError { context: format!("attach {name}"), error: e.to_string() });

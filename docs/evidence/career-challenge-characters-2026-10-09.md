@@ -174,7 +174,10 @@ Ported; see `career-marquee-graphs-2026-10-09.md`.
 `LivingWorld.ActivateSpectatorWaypoint` 0x82893da8 / `DeactivateSpectatorWaypoint` 0x8288e488 →
 `WaypointMan::ActivateSpectatorWaypoint` 0x82ce9180, `DeactivateSpectatorWaypoint` 0x82ce8ed8,
 `UpdateSpectatorActivationInfo` 0x82ce71b8 (`kMaxNumForceSpectators`, category-group forced spawns
-locked to waypoints). Used by the contest scripts (`ContestRounds`); still bound to `unported`.
+locked to waypoints). Used by the contest scripts (`ContestRounds`). Ported:
+`living_world/pedestrians/pedestrian_spectators.rs` (the `WaypointMan` queue and the group's
+activation), `session/living_world/selected_living_world_spectators.rs` (`WaypointMan::Update` in
+`Manager::Update1` between `ModelMan` and RAIN) and the career's living world operations.
 
 ### ChallengeAIManager::GetChallengeCharacters
 
