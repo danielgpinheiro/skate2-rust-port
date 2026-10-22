@@ -96,18 +96,17 @@ What Linux needs (drivers, libraries, the Steam Deck) is in [docs/release/linux.
 
 There is no download for macOS yet: build it from source, which leaves a **Skate 2.app** in
 `dist/macos`. Open it and select your copy's `default.xex` the first time. The app starts itself
-in `~/Library/Application Support/Skate 2`, where `config.json` and `saves/` then stay, and it
-writes what it prints to `game.log` there. An Xbox, PlayStation or Switch controller works
-through SDL3, as on Linux. What the build needs, and the parts of the game macOS does not have
-yet, are in [docs/release/macos.md](docs/release/macos.md).
+in `~/Library/Application Support/Skate 2`, where `config.json` and `saves/` then stay. An Xbox,
+PlayStation or Switch controller works through SDL3, as on Linux. What the build needs, and the
+parts of the game macOS does not have yet, are in [docs/release/macos.md](docs/release/macos.md).
 
 ### If the game closes or shows nothing
 
 - A message names the error and your graphics card, and a report is saved to
   `saves\crash_reports` beside the game. Send both with your report. On macOS the report is in
-  `~/Library/Application Support/Skate 2/saves/crash_reports`, and `game.log` beside it holds
-  everything the game printed; launch the **Skate 2.app** rather than the executable inside it,
-  which has no application to show a message in.
+  `~/Library/Application Support/Skate 2/saves/crash_reports`, and a fatal error the app had no
+  message box for is written there too; run `Skate 2.app/Contents/MacOS/Skate 2` from a terminal
+  to see what it prints.
 - To try the other graphics API, make a `.bat` file beside the game with `set WGPU_BACKEND=dx12`
   (or `vulkan`) on one line and `skate2-pc.exe` on the next, and run it. `set SKATE2_NO_MSAA=1`
   turns antialiasing off.

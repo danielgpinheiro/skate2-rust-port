@@ -44,8 +44,16 @@ if [ "$programs" != server ]; then
     RUSTFLAGS="$remap" cargo build --release -p skate2-pc -j 2
     app="dist/macos/Skate 2.app"
     resources="$app/Contents/Resources"
+    # Assembled afresh: a rebuild keeps nothing an earlier layout left in the bundle, which would
+    # be sealed into this signature and counted in its size.
+    rm -rf "$app"
     mkdir -p "$app/Contents/MacOS" "$resources"
-    cp target/release/skate2-pc "$resources/skate2-pc"
+    # The bundle's executable is the game itself, where a bundle keeps it: the Dock identifies a
+    # running app by that path and draws the bundle's icon for it, which a launcher script that
+    # execs a program elsewhere in the bundle would lose. The game starts itself in its own folder
+    # instead of being started there (apps/skate2-pc/src/main.rs), because a bundle's app is
+    # launched in "/".
+    cp target/release/skate2-pc "$app/Contents/MacOS/Skate 2"
     cp target/release/skate2-pc dist/macos/skate2-pc
     # The icon: the Windows icon's art as a Big Sur squircle, in the sizes an .icns holds. sips and
     # iconutil come with macOS, so the repository keeps the 1024 master and not the .icns.
@@ -80,20 +88,8 @@ if [ "$programs" != server ]; then
   <key>NSHumanReadableCopyright</key><string>MIT-licensed fan project; Skate and Skate 2 are trademarks of Electronic Arts Inc.</string>
 </dict></plist>
 PLIST
-    cat > "$app/Contents/MacOS/Skate 2" <<'LAUNCH'
-#!/bin/sh
-# Finder starts an app in "/", so the game is started in its own Application Support folder, where
-# its config.json, online-config.json and saves/ then stay. Its output names a fatal error when it
-# has no message box to show it in.
-data="$HOME/Library/Application Support/Skate 2"
-mkdir -p "$data"
-cd "$data" || exit 1
-exec "$(dirname "$0")/../Resources/skate2-pc" "$@" >>"$data/game.log" 2>&1
-LAUNCH
-    chmod +x "$app/Contents/MacOS/Skate 2"
     # Ad-hoc signatures, which is all an unsigned build can have: they keep macOS from treating
     # the bundle's own files as foreign when it verifies them.
-    codesign --force --sign - "$resources/skate2-pc" 2>/dev/null || true
     codesign --force --sign - "$app" 2>/dev/null || true
     echo "Built dist/macos/skate2-pc and 'dist/macos/Skate 2.app': open the app to play"
 fi
