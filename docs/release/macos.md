@@ -39,6 +39,12 @@ Moved elsewhere and blocked by Gatekeeper, right-click it and choose **Open**.
 
 **Controllers:** SDL3 reads every pad, as on Linux: Xbox, PlayStation, Switch and others.
 
+**Fullscreen and Game Mode:** the Fullscreen display setting (and Alt+Enter) puts a borderless
+window over its monitor. The bundle also opts into macOS's Game Mode with `LSSupportsGameMode`,
+which quiets background work for steadier frame rates; macOS 26 and later honour the key and
+decide for themselves when to turn it on, which is not tied to the window being fullscreen.
+Earlier versions ignore the key.
+
 **MP4 export:** FFmpeg with H.264 and AAC, as `ffmpeg` beside the game or on `PATH`.
 
 ## Hosting

@@ -96,9 +96,11 @@ What Linux needs (drivers, libraries, the Steam Deck) is in [docs/release/linux.
 
 There is no download for macOS yet: build it from source, which leaves a **Skate 2.app** in
 `dist/macos`. Open it and select your copy's `default.xex` the first time. The app starts itself
-in `~/Library/Application Support/Skate 2`, where `config.json` and `saves/` then stay. An Xbox,
-PlayStation or Switch controller works through SDL3, as on Linux. What the build needs, and the
-parts of the game macOS does not have yet, are in [docs/release/macos.md](docs/release/macos.md).
+in `~/Library/Application Support/Skate 2`, where `config.json` and `saves/` then stay, and it
+opts into macOS Game Mode (`LSSupportsGameMode`, macOS 26 and later), which quiets background
+work while you play. An Xbox, PlayStation or Switch controller works through SDL3, as on Linux.
+What the build needs, and the parts of the game macOS does not have yet, are in
+[docs/release/macos.md](docs/release/macos.md).
 
 ### If the game closes or shows nothing
 

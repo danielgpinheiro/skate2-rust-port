@@ -84,6 +84,7 @@ if [ "$programs" != server ]; then
   <key>CFBundleVersion</key><string>$version</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
+  <key>LSSupportsGameMode</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSHumanReadableCopyright</key><string>MIT-licensed fan project; Skate and Skate 2 are trademarks of Electronic Arts Inc.</string>
 </dict></plist>
